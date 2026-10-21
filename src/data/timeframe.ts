@@ -4,11 +4,18 @@ const NAMED_TF_MS: Record<string, number> = { D: 86_400_000, W: 604_800_000, M: 
 /**
  * Bar duration in ms for a Vela timeframe: a bare number is **minutes** (Pine
  * resolution — `60` = 1h, `240` = 4h), `D`/`W`/`M` are the named periods, and the
- * `15m`/`4h`/`1d`/`1w` aliases are also accepted. Falls back to 1h for anything unparsed.
+ * `15m`/`4h`/`1d`/`1w` aliases are also accepted. The local replay fork adds the
+ * `NS` seconds form already produced by the public timeframe picker.
+ * Falls back to 1h for anything unparsed.
  */
 export function timeframeToMs(timeframe: string): number {
     const tf = timeframe.trim();
     if (NAMED_TF_MS[tf]) return NAMED_TF_MS[tf];
+    const seconds = /^([1-9]\d*)s$/i.exec(tf);
+    if (seconds) {
+        const ms = Number(seconds[1]) * 1000;
+        return Number.isSafeInteger(ms) ? ms : 3_600_000;
+    }
     const m = /^(\d+)\s*(m|h|d|w)?$/i.exec(tf);
     if (m) {
         const n = parseInt(m[1]!, 10);

@@ -87,6 +87,130 @@ export function candleGeometry(xCss: number, spacing: number, dpr: number, bodyS
     };
 }
 
+/** Integer bitmap geometry for the terminal candle mode. Bounds are inclusive. */
+export interface TerminalCandleGeometry {
+    center: number;
+    left: number;
+    right: number;
+    top: number;
+    bottom: number;
+    high: number;
+    low: number;
+    rawBodyHeight: number;
+    width: number;
+    wickWidth: number;
+    borderWidth: number;
+}
+
+export function terminalCandleWidth(spacing: number, ratio: number): number {
+    let width: number;
+    if (spacing >= 2.5 && spacing <= 4) width = Math.floor(3 * ratio);
+    else {
+        const coefficient = 1 - 0.2 * Math.atan(Math.max(4, spacing) - 4) / (0.5 * Math.PI);
+        width = Math.max(Math.floor(ratio), Math.min(Math.floor(spacing * coefficient * ratio), Math.floor(spacing * ratio)));
+    }
+    if (width >= 2 && Math.floor(ratio) % 2 !== width % 2) width -= 1;
+    return width;
+}
+
+export function terminalCandleGeometry(
+    x: number, spacing: number, open: number, close: number, high: number, low: number,
+    horizontalRatio: number, verticalRatio = horizontalRatio, bodyScale = 1,
+): TerminalCandleGeometry {
+    const width = terminalCandleWidth(spacing * bodyScale, horizontalRatio);
+    const border = Math.floor(horizontalRatio);
+    let wick = Math.min(Math.floor(horizontalRatio), Math.floor(width * horizontalRatio));
+    wick = Math.max(Math.floor(horizontalRatio), Math.min(wick, width));
+    const center = Math.round(x * horizontalRatio);
+    const left = center - Math.floor(0.5 * width);
+    return { center, left, right: left + width - 1,
+        top: Math.round(Math.min(open, close) * verticalRatio),
+        bottom: Math.round(Math.max(open, close) * verticalRatio),
+        high: Math.round(high * verticalRatio), low: Math.round(low * verticalRatio),
+        rawBodyHeight: Math.abs(open - close) * verticalRatio,
+        width, wickWidth: wick, borderWidth: border };
+}
+
+export interface TerminalCandle<Color> {
+    geometry: TerminalCandleGeometry;
+    color: Color;
+    borderColor: Color;
+    wickColor: Color;
+    hollow: boolean;
+}
+
+export interface TerminalCandleOptions {
+    bodyVisible: boolean;
+    borderVisible: boolean;
+    wickVisible: boolean;
+    inverted: boolean;
+}
+
+/** Emit filled bitmap rectangles in wick, border, then body order. */
+export function rasterizeTerminalCandles<Color>(
+    candles: readonly TerminalCandle<Color>[], options: TerminalCandleOptions,
+    emit: (x: number, y: number, width: number, height: number, color: Color, body: boolean) => void,
+): void {
+    const rect = (x: number, y: number, w: number, h: number, color: Color, body = false): void => {
+        if (w !== 0 && h !== 0) emit(x, y, w, h, color, body);
+    };
+    const outline = (x: number, y: number, w: number, h: number, border: number, color: Color): void => {
+        rect(x + border, y, w - 2 * border, border, color);
+        rect(x + border, y + h - border, w - 2 * border, border, color);
+        rect(x, y, border, h, color);
+        rect(x + w - border, y, border, h, color);
+    };
+    if (options.wickVisible) {
+        let previousRight: number | null = null;
+        for (const candle of candles) {
+            const g = candle.geometry;
+            let top = g.top;
+            let bottom = g.bottom;
+            if (options.inverted) [bottom, top] = [top, bottom];
+            let left = g.center - Math.floor(0.5 * g.wickWidth);
+            const right = left + g.wickWidth - 1;
+            if (previousRight !== null) left = Math.min(Math.max(previousRight + 1, left), right);
+            if (g.rawBodyHeight <= g.borderWidth) {
+                if (top !== g.high) top = Math.round(top - 0.5 * g.borderWidth);
+                bottom = bottom !== g.low ? Math.round(top - 0.5 * g.borderWidth) + g.borderWidth - 1 : g.low - 1;
+            }
+            if (top !== g.high) rect(left, g.high, right - left + 1, top - g.high, candle.wickColor);
+            if (g.low !== bottom) rect(left, bottom + 1, right - left + 1, g.low - bottom - 1, candle.wickColor);
+            previousRight = right;
+        }
+    }
+    if (options.borderVisible) {
+        let previousRight: number | null = null;
+        for (const candle of candles) {
+            if (options.bodyVisible && candle.hollow) continue;
+            const g = candle.geometry;
+            let left = g.left;
+            if (previousRight !== null) left = Math.min(Math.max(previousRight + 1, left), g.right);
+            const width = g.right - left + 1;
+            if (g.rawBodyHeight <= g.borderWidth) rect(left, Math.round(g.top - 0.5 * g.borderWidth), width, g.borderWidth, candle.borderColor);
+            else if (width > 2 * g.borderWidth) outline(left, g.top, width, g.bottom - g.top + 1, g.borderWidth, candle.borderColor);
+            else rect(left, g.top, width, g.bottom - g.top + 1, candle.borderColor);
+            previousRight = g.right;
+        }
+    }
+    if (options.bodyVisible) {
+        for (const candle of candles) {
+            const g = candle.geometry;
+            if (options.borderVisible && g.width <= 2 * g.borderWidth && !candle.hollow) continue;
+            if (candle.hollow) {
+                if (g.rawBodyHeight <= g.borderWidth) rect(g.left, Math.round(g.top - 0.5 * g.borderWidth), g.width, g.borderWidth, candle.color);
+                else outline(g.left, g.top, g.width, g.bottom - g.top + 1, g.borderWidth, candle.color);
+            } else if (!options.borderVisible && g.rawBodyHeight <= g.borderWidth) {
+                rect(g.left, Math.round(g.top - 0.5 * g.borderWidth), g.width, g.borderWidth, candle.color, true);
+            } else {
+                const inset = options.borderVisible ? g.borderWidth : 0;
+                if (g.top + inset <= g.bottom - inset) rect(g.left + inset, g.top + inset,
+                    g.width - 2 * inset, g.bottom - g.top + 1 - 2 * inset, candle.color, true);
+            }
+        }
+    }
+}
+
 /** One aggregate-tier stick: a contiguous run of SAME-COLOR price coverage inside one pixel column. */
 export interface AggregatedStick {
     /** The rounded CSS-px column shared by the stick's bars (canvas2d strokes at `x + 0.5`). */

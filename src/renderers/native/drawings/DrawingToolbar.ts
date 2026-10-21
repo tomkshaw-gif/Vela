@@ -15,6 +15,19 @@ export const TOOLBAR_COLLAPSED_WIDTH = 16;
  *  keep below the topbar. */
 const FLYOUT_GAP = 3;
 
+/** Host actions placed alongside the native drawing controls. State is read on refresh. */
+export interface DrawingToolbarUtility {
+    id: string;
+    label: string;
+    icon: string;
+    group: 'navigation' | 'drawing' | 'remove' | 'footer';
+    run: () => void;
+    pressed?: () => boolean;
+    disabled?: () => boolean;
+    /** Move the native Eraser mode into this action's options flyout. */
+    eraserInMenu?: boolean;
+}
+
 /** Cosmetic/placement options — defaults reproduce the in-renderer docked bar exactly. */
 export interface DrawingToolbarOptions {
     /** Border/divider color. Default: the theme's border color (follows theme swaps). */
@@ -85,6 +98,8 @@ export class DrawingToolbar {
     private readonly tipText = new WeakMap<HTMLElement, string>(); // per-anchor tooltip text (magnet's changes with mode)
     /** Chrome-tooltip disposers — flushed whenever the cells are recreated (rebuild/destroy). */
     private tipDisposers: Array<() => void> = [];
+    private utilities: readonly DrawingToolbarUtility[] = [];
+    private readonly utilityButtons = new Map<DrawingToolbarUtility, HTMLButtonElement>();
 
     /** Explicit border override from options; `null` follows the live theme's border. */
     private readonly borderOverride: string | null;
@@ -181,6 +196,25 @@ export class DrawingToolbar {
         this.root.style.display = visible ? 'flex' : 'none';
     }
 
+    /** Replace the host's utility actions; native tool groups and modes stay authoritative. */
+    setUtilities(utilities: readonly DrawingToolbarUtility[]): void {
+        this.closeFlyout();
+        this.utilities = utilities;
+        this.rebuild();
+    }
+
+    /** Reflect live host state without rebuilding buttons or interrupting keyboard focus. */
+    refreshUtilities(): void {
+        for (const [utility, button] of this.utilityButtons) {
+            button.disabled = utility.disabled?.() ?? false;
+            if (utility.pressed) {
+                const on = utility.pressed();
+                button.setAttribute('aria-pressed', String(on));
+                button.dataset.active = on ? '1' : '';
+            }
+        }
+    }
+
     setActiveTool(type: DrawingTypeKey | null): void {
         this.active = type;
         if (type) {
@@ -213,6 +247,7 @@ export class DrawingToolbar {
         this.root.replaceChildren();
         this.groupCells.clear();
         this.groupIcons.clear();
+        this.utilityButtons.clear();
         this.cursorBtn = this.makeButton(CURSOR_ICON, 'Cursor', () => this.onCursorClick());
         this.root.appendChild(this.cursorBtn);
         if (this.def.groups.length > 0) this.root.appendChild(this.divider());
@@ -225,16 +260,28 @@ export class DrawingToolbar {
         this.root.appendChild(this.divider());
         this.measureBtn = this.makeButton(RULER_ICON, 'Measure', () => this.onMeasure());
         this.root.appendChild(this.measureBtn);
+        const extended = this.utilities.length > 0;
         this.eraserBtn = this.makeButton(ERASER_ICON, 'Eraser (click/drag to delete)', () => this.onEraser());
-        this.root.appendChild(this.eraserBtn);
+        const eraserInMenu = this.utilities.some((utility) => utility.eraserInMenu);
+        if (!extended) this.root.appendChild(this.eraserBtn);
+        this.appendUtilities('navigation');
+        if (this.utilities.some((u) => u.group === 'navigation')) this.root.appendChild(this.divider());
         this.root.appendChild(this.makeMagnetCell());
         this.stayBtn = this.makeButton(STAY_ICON, 'Stay in drawing mode', () => this.toggleStay());
         this.root.appendChild(this.stayBtn);
+        this.appendUtilities('drawing');
         // Drawings-sync toggle — only a multi-chart host provides the callback.
         if (this.onDrawingsSync) {
             this.syncBtn = this.makeButton(SYNC_ICON, 'Sync drawings on all charts', () => this.toggleDrawingsSync());
             this.root.appendChild(this.syncBtn);
         }
+        if (extended) {
+            this.root.appendChild(this.divider());
+            if (!eraserInMenu) this.root.appendChild(this.eraserBtn);
+        }
+        this.appendUtilities('remove');
+        this.appendUtilities('footer');
+        this.root.dataset.utilityFooter = String(this.utilities.some((u) => u.group === 'footer'));
         // Collapse/expand toggle — pinned to the bottom; the only child a collapsed strip shows.
         this.collapseBtn = this.makeButton(COLLAPSE_ICON, 'Collapse toolbar', () => this.toggleCollapsed());
         this.collapseBtn.classList.add('vela-dtb-collapse');
@@ -246,6 +293,62 @@ export class DrawingToolbar {
         this.paintDrawingsSync();
         this.paintCollapse();
         this.highlight();
+        this.refreshUtilities();
+    }
+
+    private appendUtilities(group: DrawingToolbarUtility['group']): void {
+        for (const utility of this.utilities.filter((u) => u.group === group)) {
+            if (utility.eraserInMenu) {
+                let toggle: HTMLButtonElement | null = null;
+                const { cell, icon, arrow } = this.makeCell(utility.label, {
+                    multi: true, iconSvg: utility.icon,
+                    onIcon: () => { if (!icon.disabled) { utility.run(); this.refreshUtilities(); } },
+                    onArrow: () => this.toggleUtilityFlyout(utility, cell, toggle!),
+                });
+                toggle = arrow;
+                if (arrow) {
+                    arrow.dataset.utilityMenu = utility.id;
+                    arrow.setAttribute('aria-haspopup', 'menu'); arrow.setAttribute('aria-expanded', 'false');
+                }
+                icon.dataset.utility = utility.id;
+                this.utilityButtons.set(utility, icon); this.root.append(cell);
+                continue;
+            }
+            const button = this.makeButton(utility.icon, utility.label, () => {
+                if (!button.disabled) { utility.run(); this.refreshUtilities(); }
+            });
+            button.dataset.utility = utility.id;
+            if (group === 'footer') button.classList.add('vela-dtb-utility-footer');
+            this.utilityButtons.set(utility, button);
+            this.root.appendChild(button);
+        }
+    }
+
+    private toggleUtilityFlyout(utility: DrawingToolbarUtility, cell: HTMLElement, arrow: HTMLButtonElement): void {
+        const owner = `utility:${utility.id}`;
+        if (this.flyoutOwnerId === owner) { this.closeFlyout(); arrow.focus(); return; }
+        this.closeFlyout();
+        const fly = this.beginFlyout(owner, cell);
+        fly.setAttribute('role', 'menu'); fly.setAttribute('aria-label', 'Drawing removal options');
+        arrow.setAttribute('aria-expanded', 'true');
+        const finish = (action: () => void): void => { action(); this.closeFlyout(); this.refreshUtilities(); arrow.focus(); };
+        const remove = this.makeFlyoutItem({ icon: utility.icon, label: utility.label, onSelect: () => finish(utility.run) });
+        remove.disabled = utility.disabled?.() ?? false; remove.setAttribute('role', 'menuitem');
+        const eraser = this.makeFlyoutItem({ icon: ERASER_ICON, label: 'Eraser (click/drag to delete)', selected: this.eraserActive,
+            onSelect: () => finish(this.onEraser) });
+        eraser.setAttribute('role', 'menuitemcheckbox'); eraser.setAttribute('aria-checked', String(this.eraserActive));
+        fly.append(remove, eraser);
+        const enabled = [remove, eraser].filter((button) => !button.disabled);
+        fly.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); this.closeFlyout(); arrow.focus(); }
+            if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+                event.preventDefault(); event.stopPropagation();
+                const current = enabled.indexOf(document.activeElement as HTMLButtonElement);
+                enabled[(current + (event.key === 'ArrowDown' ? 1 : enabled.length - 1)) % enabled.length]?.focus();
+            }
+        });
+        announceSurface(fly, true, 'menu', cell);
+        enabled[0]?.focus();
     }
 
     /** Collapse to a slim expand-strip / restore the full bar, and tell the host so a
@@ -403,6 +506,10 @@ export class DrawingToolbar {
         const b = this.eraserBtn;
         if (!b) return;
         b.dataset.active = this.eraserActive ? '1' : '';
+        for (const [utility, button] of this.utilityButtons) if (utility.eraserInMenu) {
+            const cell = button.closest<HTMLElement>('.vela-dtb-cell');
+            if (cell) cell.dataset.active = this.eraserActive ? '1' : '';
+        }
     }
 
     private paintMagnet(): void {
@@ -654,6 +761,7 @@ export class DrawingToolbar {
         this.starEls.clear();
         const fly = this.flyout;
         if (fly) {
+            this.flyoutCell?.querySelector('[data-utility-menu]')?.setAttribute('aria-expanded', 'false');
             // Cleared before announcing: a listener that closes the flyout must not re-enter.
             this.flyout = null;
             announceSurface(fly, false, 'menu', this.flyoutCell);
@@ -742,13 +850,18 @@ function ensureStyles(): void {
 .vela-dtb-btn:hover .vela-dtb-hit{background:var(--vela-hover);}
 .vela-dtb-btn[data-active='1']{color:var(--vela-fg-bright);}
 .vela-dtb-btn[data-active='1'] .vela-dtb-hit{background:var(--vela-active);}
+.vela-dtb [data-utility]:disabled{opacity:.4;cursor:default;}
+.vela-dtb [data-utility]:disabled .vela-dtb-hit{background:transparent;}
+.vela-dtb[data-utility-footer='true'] .vela-dtb-utility-footer{margin-top:auto;}
+.vela-dtb[data-utility-footer='true'] .vela-dtb-collapse{margin-top:0;}
+.vela-dtb [data-utility]:focus-visible{outline:2px solid var(--vela-focus);outline-offset:-3px;}
 .vela-dtb-cell{position:relative;display:flex;align-items:center;justify-content:center;width:100%;height:30px;}
 .vela-dtb-icon{flex:none;width:26px;height:30px;display:flex;align-items:center;justify-content:center;background:transparent;border:none;color:inherit;cursor:pointer;padding:0;transition:color var(--vela-dur-fast) ease;}
 .vela-dtb-icon:hover{color:var(--vela-fg-bright);}
 .vela-dtb-cell[data-active='1'] .vela-dtb-icon{color:var(--vela-fg-bright);}
 .vela-dtb-cell[data-active='1'] .vela-dtb-icon .vela-dtb-hit{background:var(--vela-active);}
 .vela-dtb-arrow{position:absolute;right:1px;top:50%;transform:translateY(-50%);display:flex;align-items:center;justify-content:center;background:transparent;border:none;color:inherit;cursor:pointer;padding:0;opacity:0;pointer-events:none;transition:opacity var(--vela-dur-fast) ease,color var(--vela-dur-fast) ease;}
-.vela-dtb-cell:hover .vela-dtb-arrow,.vela-dtb-icon:hover~.vela-dtb-arrow,.vela-dtb-cell.vela-open .vela-dtb-arrow{opacity:1;pointer-events:auto;}
+.vela-dtb-cell:hover .vela-dtb-arrow,.vela-dtb-cell:focus-within .vela-dtb-arrow,.vela-dtb-icon:hover~.vela-dtb-arrow,.vela-dtb-cell.vela-open .vela-dtb-arrow{opacity:1;pointer-events:auto;}
 .vela-dtb-arrow:hover{color:var(--vela-fg-bright);}
 .vela-dtb-icon:hover .vela-dtb-hit,.vela-dtb-arrow:hover .vela-dtb-hit{background:var(--vela-hover);}
 .vela-dtb-cell.vela-open .vela-dtb-arrow .vela-dtb-hit{background:var(--vela-active);}

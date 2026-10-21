@@ -30,6 +30,7 @@ describe('presetToRange', () => {
 
     it('maps each span preset to the right window before the last bar', () => {
         expect(presetToRange('1D', data)!.from).toBe(last - DAY);
+        expect(presetToRange('5D', data)!.from).toBe(last - 5 * DAY);
         expect(presetToRange('1M', data)!.from).toBe(last - 30 * DAY);
         expect(presetToRange('3M', data)!.from).toBe(last - 90 * DAY);
         expect(presetToRange('6M', data)!.from).toBe(last - 180 * DAY);

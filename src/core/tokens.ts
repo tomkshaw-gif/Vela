@@ -49,6 +49,8 @@ export function themeTokens(t: VelaTheme): Record<string, string> {
         '--vela-fg-muted': dark ? '#868a96' : withAlpha(t.textColor, 0.62),
         '--vela-fg-faint': withAlpha(t.textColor, 0.35),
         '--vela-fg-bright': dark ? '#f0f3fa' : '#000000',
+        '--vela-legend-action-ink-default': dark ? '#dbdbdb' : '#0f0f0f',
+        '--vela-legend-hidden-ink-default': dark ? '#575757' : '#b8b8b8',
         '--vela-surface': t.background,
         // Panels and menus float ABOVE the chart, so their surface is the wash flattened onto
         // the chart background — opaque, or candles read through the panel.

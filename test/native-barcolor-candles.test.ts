@@ -52,6 +52,7 @@ function recordingCtx(): { ctx: CanvasRenderingContext2D; ops: Array<{ op: strin
 }
 
 interface PaintOptions {
+    hollowUp?: boolean;
     barColor?: string;
     bar?: { time: number; open: number; high: number; low: number; close: number };
     borderVisible?: boolean;
@@ -69,6 +70,7 @@ function paint(opts: PaintOptions = {}): Array<{ op: string; style: string }> {
     const scene = new SceneGraph();
     scene.bars = [bar];
     scene.showGrid = false; // isolate the candle ops
+    scene.style.candle.hollowUp = opts.hollowUp;
     if (opts.borderVisible !== undefined) scene.style.candle.borderVisible = opts.borderVisible;
     if (opts.borderUpColor !== undefined) scene.style.candle.borderUpColor = opts.borderUpColor;
     const pane = scene.ensurePane('price', 'price', 0, 3);
@@ -93,6 +95,13 @@ function paint(opts: PaintOptions = {}): Array<{ op: string; style: string }> {
 }
 
 describe('canvas2d candles — barcolor() tints the body, the border follows its setting', () => {
+    it('leaves rising bodies transparent while falling bodies remain filled', () => {
+        const rising = paint({ hollowUp: true, borderVisible: true });
+        expect(rising).toEqual([{ op: 'stroke', style: THEME.upColor }, { op: 'stroke', style: THEME.upColor }]);
+        const falling = paint({ hollowUp: true, borderVisible: true, bar: { time: 0, open: 105, high: 106, low: 99, close: 100 } });
+        expect(falling).toEqual([{ op: 'stroke', style: THEME.downColor }, { op: 'fill', style: THEME.downColor }, { op: 'stroke', style: THEME.downColor }]);
+    });
+
     it('plain candle: body + wick in the direction color, no border (borders default off)', () => {
         const ops = paint();
         expect(ops).toEqual([

@@ -39,6 +39,24 @@ function config(ws: VelaWorkspace, id: string): ChartConfig {
 }
 
 describe('style link', () => {
+    it('keeps the shared attribution readable against the bottom-left plot independently of dark chrome', () => {
+        const ws = mountWorkspace({ layout: '2h', theme: 'dark' });
+        const visibleMark = (): HTMLElement => [...ws.root.querySelectorAll<HTMLElement>('.vela-attribution')].find((mark) => mark.style.zIndex === '11')!;
+        const mark = visibleMark();
+        expect(mark.style.color).toBe('rgb(255, 255, 255)');
+        ws.cell('c1')!.chart.renderer.applyConfig({ layout: { background: '#ffffff', textColor: '#777777' } });
+        expect(mark.style.color).toBe('rgb(0, 0, 0)');
+        ws.cell('c2')!.chart.renderer.applyConfig({ layout: { background: '#151619', textColor: '#b2b5be' } });
+        expect(mark.style.color).toBe('rgb(0, 0, 0)');
+        ws.cell('c1')!.chart.renderer.applyConfig({ layout: { backgroundGradient: { topColor: '#ffffff', bottomColor: '#000000' } } });
+        expect(mark.style.color).toBe('rgb(255, 255, 255)');
+        ws.cell('c2')!.chart.renderer.applyConfig({ layout: { backgroundGradient: { topColor: '#ffffff', bottomColor: '#dddddd' } } });
+        expect(mark.style.color).toBe('rgb(255, 255, 255)');
+        ws.cell('c1')!.chart.renderer.applyConfig({ layout: { backgroundGradient: { topColor: '#ffffff', bottomColor: '#d9d9d9' } } });
+        expect(mark.style.color).toBe('rgb(0, 0, 0)');
+        expect(mark.dataset.velaScreenshot).toBe('1');
+    });
+
     it('candle body colors edited on one chart repaint its linked peers', () => {
         const ws = mountWorkspace({ layout: '2h', sync: { style: true } });
         ws.cell('c1')!.chart.renderer.applyConfig({ candles: { upColor: '#123456', downColor: '#654321' } });

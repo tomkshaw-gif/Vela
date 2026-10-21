@@ -4,6 +4,7 @@ import { withAlpha } from '../../../core/color';
 import { ACCENT, BEARISH, BULLISH, CHIP_PLATE, CROSSHAIR, SERIES_LINE, WARNING } from '../../../core/palette';
 import type { PriceStyle } from '../../../core/options';
 import type { ScaleMode } from './SceneGraph';
+import { backgroundGradient, type BackgroundGradient } from './background';
 
 /**
  * Comprehensive, **serializable** native-renderer style/config (item 15).
@@ -61,6 +62,8 @@ export interface CrosshairStyle {
 export interface CandleStyle {
     /** Whether the filled candle body is drawn (off ⇒ wicks/borders only). */
     bodyVisible: boolean;
+    /** Rising candles keep their border/wicks but leave the body unfilled. */
+    hollowUp?: boolean;
     borderVisible: boolean;
     /** `null` ⇒ inherit the body color. */
     borderUpColor: string | null;
@@ -152,6 +155,7 @@ export interface ChartMargins {
 export const DEFAULT_MARGINS: ChartMargins = { top: 10, bottom: 10, right: 10 };
 
 export interface ChartStyle {
+    backgroundGradient: BackgroundGradient | null;
     /** Per-chart-type settings (plugin SDK sections), keyed by type id then row key. */
     chartTypes: Record<string, Record<string, unknown>>;
     /** Axis/label font size in CSS px (the family stays on the theme). */
@@ -175,6 +179,7 @@ export interface ChartStyle {
 /** A fresh live style store with every value at its "inherit / current behavior" default. */
 export function defaultChartStyle(): ChartStyle {
     return {
+        backgroundGradient: null,
         chartTypes: {},
         fontSize: 11,
         margins: { ...DEFAULT_MARGINS },
@@ -214,6 +219,8 @@ export interface ChartConfig {
     version: number;
     layout: {
         background: string;
+        /** Null selects a solid background. Stops are concrete hex colors. */
+        backgroundGradient?: BackgroundGradient | null;
         textColor: string;
         fontFamily: string;
         fontSize: number;
@@ -289,6 +296,7 @@ export interface ChartConfig {
         upColor: string;
         downColor: string;
         bodyVisible: boolean;
+        hollowUp?: boolean;
         borderVisible: boolean;
         borderUpColor: string;
         borderDownColor: string;
@@ -438,6 +446,7 @@ export function effectiveCandlePaint(
         up: override.upColor ?? themeUp,
         down: override.downColor ?? themeDown,
         candle: {
+            hollowUp: base.hollowUp,
             bodyVisible: override.bodyVisible ?? base.bodyVisible,
             borderVisible: override.borderVisible ?? base.borderVisible,
             borderUpColor: override.borderUpColor ?? base.borderUpColor,
@@ -661,6 +670,9 @@ export function mergeConfig(base: ChartConfig, patch: unknown): ChartConfig {
         chartTypes: chartTypesBag,
         layout: {
             background: isColor(layout.background) ? layout.background : base.layout.background,
+            backgroundGradient: layout.backgroundGradient === null ? null
+                : backgroundGradient(layout.backgroundGradient)
+                    ?? (layout.backgroundGradient === undefined && isColor(layout.background) ? null : base.layout.backgroundGradient ?? null),
             textColor: isColor(layout.textColor) ? layout.textColor : base.layout.textColor,
             fontFamily: isColor(layout.fontFamily) ? layout.fontFamily : base.layout.fontFamily,
             fontSize: isNum(layout.fontSize) ? Math.max(6, Math.min(32, layout.fontSize)) : base.layout.fontSize,
@@ -731,6 +743,7 @@ export function mergeConfig(base: ChartConfig, patch: unknown): ChartConfig {
             upColor: isColor(candles.upColor) ? candles.upColor : base.candles.upColor,
             downColor: isColor(candles.downColor) ? candles.downColor : base.candles.downColor,
             bodyVisible: isBool(candles.bodyVisible) ? candles.bodyVisible : base.candles.bodyVisible,
+            hollowUp: isBool(candles.hollowUp) ? candles.hollowUp : base.candles.hollowUp ?? false,
             borderVisible: isBool(candles.borderVisible) ? candles.borderVisible : base.candles.borderVisible,
             borderUpColor: isColor(candles.borderUpColor) ? candles.borderUpColor : base.candles.borderUpColor,
             borderDownColor: isColor(candles.borderDownColor) ? candles.borderDownColor : base.candles.borderDownColor,

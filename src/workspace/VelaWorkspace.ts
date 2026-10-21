@@ -44,8 +44,9 @@ import { TimezoneDrawer } from '../widget/timezone-drawer';
 import { PriceScaleDrawer } from '../widget/price-scale-drawer';
 import { DrawingPill } from '../widget/drawing-pill';
 import { priceStyleIds } from '../renderers/native/core/chartConfig';
+import { backgroundCornerColor, backgroundGradient } from '../renderers/native/core/background';
 import { resolveIndicators, type IndicatorManifest, type ResolvedIndicator } from '../widget/indicators';
-import { DrawingToolbar } from '../renderers/native/drawings/DrawingToolbar';
+import { DrawingToolbar, type DrawingToolbarUtility } from '../renderers/native/drawings/DrawingToolbar';
 import { applyAttributionMarkTheme, createAttributionMark, createCustomMark } from '../renderers/native/chrome/AttributionMark';
 import { rendererDefaults } from '../core/renderer-defaults';
 import { buildToolbar, type DrawingTypeKey, type SerializedDrawing, type SnapMode, type ToolbarDefinition } from '../core/drawings';
@@ -701,6 +702,9 @@ export class VelaWorkspace {
                 ? new Bottombar(this.root, {
                       timezone: this.timezone,
                       clock: this.clock,
+                      rangePresets: opts.rangePresets,
+                      onDateJump: opts.onDateJump,
+                      sessionControls: opts.sessionControls,
                       onRange: (preset) => {
                           this.active.applyRange(preset);
                           this.bottombar?.setActiveRange(preset.id);
@@ -946,6 +950,16 @@ export class VelaWorkspace {
         }
     }
 
+    /** Extend the shared drawing rail with actions routed by the host to its current chart. */
+    setDrawingToolbarUtilities(utilities: readonly DrawingToolbarUtility[]): void {
+        this.drawToolbar?.setUtilities(utilities);
+    }
+
+    /** Re-project host action state without replacing focused drawing-rail buttons. */
+    refreshDrawingToolbarUtilities(): void {
+        this.drawToolbar?.refreshUtilities();
+    }
+
     /** The sync-link control surface: `set(kind, true | {cellId: group} | false)`,
      *  `get(kind)`, `state()`. Enabling a market/viewport link aligns the followers to
      *  the ACTIVE cell once, so the grid starts coherent; `crosshair` mirrors the
@@ -1168,6 +1182,7 @@ export class VelaWorkspace {
         // Each cell's own `setTheme` no-ops once the theme already matches, so the
         // per-cell `theme:changed` echoes (see wireCell) terminate immediately.
         for (const cell of this.cellsById.values()) cell.chart.setTheme(t);
+        this.mountAttributionMark();
     }
 
     // ── layout ──────────────────────────────────────────────────
@@ -1638,8 +1653,15 @@ export class VelaWorkspace {
     private mountAttributionMark(): void {
         const mark = this.attributionMark;
         if (!mark) return;
-        const host = this.bottomLeftCell()?.host ?? this.gridEl;
+        const cell = this.bottomLeftCell();
+        const host = cell?.host ?? this.gridEl;
         if (mark.parentElement !== host) host.appendChild(mark);
+        const config = cell?.chart.renderer.getConfig() as { layout?: { background?: unknown; backgroundGradient?: unknown } } | null | undefined;
+        const background = config?.layout?.background;
+        applyAttributionMarkTheme(mark, backgroundCornerColor(
+            typeof background === 'string' ? background : resolveTheme(this.opts.theme).background,
+            backgroundGradient(config?.layout?.backgroundGradient),
+        ));
     }
 
     /** Create the cells the current layout wants but don't exist yet (pool-first).
@@ -1824,7 +1846,10 @@ export class VelaWorkspace {
         chart.on('viewport:changed', (range) => this.propagateViewport(cell.id, range));
         // Style sync: any committed config edit (settings dialog, applyConfig) mirrors
         // this cell's style-link slice onto its same-group followers.
-        chart.renderer.onConfigChanged(() => this.propagateStylePrefs(cell.id));
+        chart.renderer.onConfigChanged(() => {
+            this.propagateStylePrefs(cell.id);
+            if (this.bottomLeftCell()?.id === cell.id) this.mountAttributionMark();
+        });
         // A theme picked in ONE cell (its settings dialog's Canvas → Theme) re-skins the
         // WHOLE workspace — shared chrome plus every other cell.
         chart.on('theme:changed', (t) => this.setTheme(t));
@@ -2264,7 +2289,7 @@ export class VelaWorkspace {
         this.tfDrawer ??= new TimeframeDrawer({
             host: this.root,
             timeframes: this.opts.timeframes ?? DEFAULT_TIMEFRAMES,
-            ranges: RANGE_PRESETS,
+            ranges: this.opts.rangePresets ?? RANGE_PRESETS,
             currentTimeframe: () => this.active.timeframe,
             activeRange: () => this.active.activeRangeId,
             onTimeframe: (tf) => this.setActiveTimeframe(tf),

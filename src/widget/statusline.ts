@@ -1,6 +1,6 @@
 // In-chart status line (top-left overlay): symbol + the OHLC/change of the bar under the
 // crosshair, falling back to the latest live bar. Resting values come from the chart's
-// `bar` event; hover values from the renderer crosshair seam (RendererControl.onCrosshairMove).
+// `latestBar` snapshot and data events; hover values from the renderer crosshair seam.
 import type { Vela } from '../Vela';
 import type { OHLCV } from '../core/model/ohlcv';
 import { injectStyles } from '../ui/styles';
@@ -8,13 +8,12 @@ import { Tooltip } from '../ui/components/tooltip';
 import { CalloutBubble } from '../ui/components/callout-bubble';
 import { Menu } from '../ui/components/menu';
 import { segmentVisibility, statuslineMenuItems, STATUSLINE_LADDER, readoutCells, type StatuslinePart, type StatuslineLayout } from './statusline-model';
-import { SESSION_PRE, SESSION_POST, SESSION_OFF } from '../core/palette';
-import { iconAt } from '../core/icons';
+import { ACCENT, SESSION_PRE, SESSION_POST, SESSION_OFF } from '../core/palette';
 import { fmtPrice, fmtChange, fmtChangePct, decimalsFor } from './format';
 import { timeframeLabel } from './timeframe';
 import { tickerIconEl } from './symbol-icon';
 import { parseSymbol } from '../data/ProviderRegistry';
-import { LEGEND_AT_TOP_ATTR } from '../renderers/shared/InputsUI';
+import { LEGEND_AT_TOP_ATTR, LEGEND_APPEARANCE_ATTR, legendEyeMarkup } from '../renderers/shared/InputsUI';
 
 const STYLE_ID = 'vela-widget-statusline';
 const CSS = `
@@ -140,10 +139,59 @@ const CSS = `
  * CARRY a status line (the marker class set by the Statusline constructor) — the
  * stylesheet is document-global, so a bare attribute selector here would shift every
  * chart on the page, including statusline-less ones. */
-.vela-has-statusline [${LEGEND_AT_TOP_ATTR}] { transform: translateY(26px); }
+.vela-has-statusline [${LEGEND_AT_TOP_ATTR}] { transform: translateY(var(--vela-statusline-legend-offset, 26px)); }
 /* A stacked chip is two lines tall — the legend shifts one more line. fit() flags the
  * host whenever the ladder lands on a stacked layout. */
-.vela-has-statusline.vela-sl-stacked-host [${LEGEND_AT_TOP_ATTR}] { transform: translateY(40px); }
+.vela-has-statusline.vela-sl-stacked-host [${LEGEND_AT_TOP_ATTR}] { transform: translateY(var(--vela-statusline-legend-offset, 40px)); }
+.vela-sl-accessory {
+    position: absolute;
+    top: calc(var(--vela-statusline-top, var(--vela-space-2)) + var(--vela-statusline-accessory-top, 0px));
+    left: calc(var(--vela-toolbar-gutter, 0px) + 10px);
+    max-width: calc(100% - var(--vela-toolbar-gutter, 0px) - var(--vela-scale-gutter, 0px) - 24px);
+    width: max-content;
+    overflow: hidden;
+    z-index: 10;
+    pointer-events: auto;
+}
+[${LEGEND_APPEARANCE_ATTR}='terminal'] .vela-statusline {
+    top: 4px;
+    left: calc(var(--vela-toolbar-gutter, 0px) + 9px);
+    align-items: center;
+    gap: 0;
+    min-height: 24px;
+    padding: 0 4px 0 3px;
+    margin-left: -3px;
+    border-radius: 0;
+    font-size: 13px;
+    font-family: -apple-system, BlinkMacSystemFont, 'Trebuchet MS', Roboto, Ubuntu, sans-serif;
+    font-feature-settings: 'tnum' on, 'lnum' on;
+    box-sizing: border-box;
+}
+[${LEGEND_APPEARANCE_ATTR}='terminal'] .vela-statusline .vela-sl-row { align-items: center; gap: 0; min-height: 24px; }
+[${LEGEND_APPEARANCE_ATTR}='terminal'] .vela-statusline .vela-sl-avatar { margin-right: 4px; }
+[${LEGEND_APPEARANCE_ATTR}='terminal'] .vela-statusline .vela-sl-symbol { font-size: 16px; font-weight: 400; }
+[${LEGEND_APPEARANCE_ATTR}='terminal'] .vela-statusline .vela-sl-meta { margin-left: 0; color: inherit; font-size: 16px; font-weight: 400; }
+[${LEGEND_APPEARANCE_ATTR}='terminal'] .vela-statusline .vela-sl-meta-part { display: inline-block; position: relative; padding-left: 12px; }
+[${LEGEND_APPEARANCE_ATTR}='terminal'] .vela-statusline .vela-sl-meta-part::before { content: '·'; position: absolute; left: 0; width: 12px; text-align: center; }
+[${LEGEND_APPEARANCE_ATTR}='terminal'] .vela-statusline .vela-sl-market { margin: 0 4px; }
+[${LEGEND_APPEARANCE_ATTR}='terminal'] .vela-statusline .vela-sl-replay-badge { width: 18px; height: 18px; border-radius: 9px; background: ${ACCENT}; color: #fff; }
+[${LEGEND_APPEARANCE_ATTR}='terminal'] .vela-statusline .vela-sl-replay-badge svg { width: 18px; height: 18px; }
+[${LEGEND_APPEARANCE_ATTR}='terminal'] .vela-statusline .vela-sl-values { margin-left: 4px; }
+[${LEGEND_APPEARANCE_ATTR}='terminal'] .vela-statusline .vela-sl-ohlc { gap: 0; }
+[${LEGEND_APPEARANCE_ATTR}='terminal'] .vela-statusline .vela-sl-ohlc > span { padding-right: 6px; }
+[${LEGEND_APPEARANCE_ATTR}='terminal'] .vela-statusline .vela-sl-ohlc b { font-weight: 400; }
+[${LEGEND_APPEARANCE_ATTR}='terminal'] .vela-statusline.vela-sl-stacked { row-gap: 0; }
+[${LEGEND_APPEARANCE_ATTR}='terminal'] .vela-statusline.vela-sl-stacked .vela-sl-values { margin-left: 0; }
+[${LEGEND_APPEARANCE_ATTR}='terminal'] .vela-statusline .vela-sl-eye { width: 28px; height: 24px; color: var(--vela-legend-action-ink, var(--vela-legend-action-ink-default)); }
+.vela-statusline .vela-legend-glyph-terminal { display: none; }
+[${LEGEND_APPEARANCE_ATTR}='terminal'] .vela-statusline .vela-legend-glyph-standard { display: none; }
+[${LEGEND_APPEARANCE_ATTR}='terminal'] .vela-statusline .vela-legend-glyph-terminal { display: inline-flex; }
+[${LEGEND_APPEARANCE_ATTR}='terminal'] .vela-statusline.vela-sl-chart-hidden { opacity: 1; }
+[${LEGEND_APPEARANCE_ATTR}='terminal'] .vela-sl-chart-hidden .vela-sl-symbol,
+[${LEGEND_APPEARANCE_ATTR}='terminal'] .vela-sl-chart-hidden .vela-sl-meta { color: var(--vela-legend-hidden-ink, var(--vela-legend-hidden-ink-default)); }
+[${LEGEND_APPEARANCE_ATTR}='terminal'] .vela-sl-accessory { --vela-statusline-top: 4px; left: calc(var(--vela-toolbar-gutter, 0px) + 9px); }
+[${LEGEND_APPEARANCE_ATTR}='terminal'] [${LEGEND_AT_TOP_ATTR}] { transform: translateY(var(--vela-statusline-legend-offset, 20px)); }
+[${LEGEND_APPEARANCE_ATTR}='terminal'].vela-sl-stacked-host [${LEGEND_AT_TOP_ATTR}] { transform: translateY(var(--vela-statusline-legend-offset, 44px)); }
 /* Mobile: the same ladder at the phone's type scale — the width alone decides how much
  * of the readout fits, exactly as on a narrow desktop chart. */
 [data-layout='mobile'] .vela-statusline { font-size: var(--vela-font-size-sm); }
@@ -197,6 +245,7 @@ const REPLAY_BADGE_SVG =
     '<circle cx="8" cy="8" r="8" style="fill: var(--vela-selected-bg)"/>' +
     '<path d="M11.7 4.75v6.5L7.2 8zM7.2 4.75v6.5L2.7 8z" style="fill: var(--vela-selected-fg); stroke: var(--vela-selected-fg); stroke-width: 0.8; stroke-linejoin: round"/>' +
     '</svg>';
+const TERMINAL_REPLAY_BADGE_SVG = '<svg viewBox="0 0 18 18" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M8 13 4 9l4-4zm4 0L8 9l4-4z"/></svg>';
 
 /** Session ink: open wears the theme's up color; the other sessions are meaning
  *  constants from the palette (amber pre, sky post and extended, gray closed/holiday).
@@ -290,6 +339,8 @@ export class Statusline {
     private marketStatus: MarketStatus = 'open';
     /** The chart replays past bars — the badge shows the replay mode (see {@link setReplaying}). */
     private replaying = false;
+    /** A host replay controller supplies the bars without entering the native replay controller. */
+    private externalReplaying = false;
     /** The right-click action menu — present once a host wires it via {@link attachMenu}. */
     private menu: Menu | null = null;
     private menuHooks: StatuslineMenuHooks | null = null;
@@ -310,6 +361,12 @@ export class Statusline {
     /** Fit mode (multi-chart cells): one row, overflowing segments hidden — see {@link setFitMode}. */
     private fitMode = false;
     private fitRO: ResizeObserver | null = null;
+    private accessory: HTMLElement | null = null;
+    private accessoryElement: HTMLElement | null = null;
+    private appearance: 'standard' | 'terminal' = 'standard';
+    private metaTimeframe = '';
+    private metaProvider = '';
+    private destroyed = false;
     /** The identity row (avatar / symbol / meta / market) and the values row (readout /
      *  eye) — one line side by side, or a two-line column once the ladder stacks them. */
     private readonly identityRow: HTMLElement;
@@ -370,7 +427,7 @@ export class Statusline {
         this.eyeEl = doc.createElement('button');
         this.eyeEl.type = 'button';
         this.eyeEl.className = 'vela-sl-eye';
-        this.eyeEl.innerHTML = iconAt('eye-off', 14);
+        this.eyeEl.innerHTML = legendEyeMarkup(true, 14);
         this.eyeEl.setAttribute('aria-label', 'Show chart');
         this.eyeEl.style.display = 'none';
         this.eyeEl.addEventListener('click', (e) => {
@@ -388,8 +445,12 @@ export class Statusline {
         host.appendChild(this.el);
         // The ladder measures against the plot width — re-fit on every host resize.
         if (typeof ResizeObserver !== 'undefined') {
-            this.fitRO = new ResizeObserver(() => this.fit());
+            this.fitRO = new ResizeObserver((entries) => {
+                if (entries.some((entry) => entry.target === host)) this.fit();
+                else this.syncAccessoryLayout();
+            });
             this.fitRO.observe(host);
+            this.fitRO.observe(this.el);
         }
         doc.fonts?.addEventListener('loadingdone', this.onFontsLoaded);
         // The tooltips portal to the nearest `.vela-ui` ancestor for theme tokens — resolve
@@ -420,6 +481,63 @@ export class Statusline {
         if (on === this.fitMode) return;
         this.fitMode = on;
         this.fit();
+    }
+
+    /** Opt into compact terminal typography without changing the standard widget. */
+    setAppearance(appearance: 'standard' | 'terminal'): void {
+        if (appearance === this.appearance) return;
+        this.appearance = appearance;
+        this.replayBadge.innerHTML = appearance === 'terminal' ? TERMINAL_REPLAY_BADGE_SVG : REPLAY_BADGE_SVG;
+        if (appearance === 'terminal') this.host.setAttribute(LEGEND_APPEARANCE_ATTR, appearance);
+        else this.host.removeAttribute(LEGEND_APPEARANCE_ATTR);
+        this.renderMeta();
+        this.fit();
+    }
+
+    /** Mount one host-owned row below the price readout; replacing it detaches the old row. */
+    attachAccessory(element: HTMLElement): () => void {
+        if (this.destroyed) return () => {};
+        this.detachAccessory();
+        const wrapper = this.el.ownerDocument.createElement('div');
+        wrapper.className = 'vela-sl-accessory';
+        wrapper.dataset.velaScreenshot = '1';
+        wrapper.appendChild(element);
+        this.host.appendChild(wrapper);
+        this.accessory = wrapper;
+        this.accessoryElement = element;
+        this.fitRO?.observe(wrapper);
+        this.syncAccessoryLayout();
+        return () => {
+            if (this.accessoryElement === element && this.accessory === wrapper) this.detachAccessory();
+        };
+    }
+
+    private detachAccessory(): void {
+        if (this.accessory) {
+            this.fitRO?.unobserve(this.accessory);
+            this.accessoryElement?.remove();
+            this.accessory.remove();
+        }
+        this.accessory = null;
+        this.accessoryElement = null;
+        this.host.style.removeProperty('--vela-statusline-accessory-top');
+        this.host.style.removeProperty('--vela-statusline-legend-offset');
+    }
+
+    private syncAccessoryLayout(): void {
+        if (!this.accessory) return;
+        const accessoryHeight = this.accessory.getBoundingClientRect().height;
+        if (accessoryHeight <= 0) {
+            this.host.style.removeProperty('--vela-statusline-accessory-top');
+            this.host.style.removeProperty('--vela-statusline-legend-offset');
+            return;
+        }
+        const measuredHeight = this.el.getBoundingClientRect().height;
+        const headerHeight = measuredHeight > 0 ? measuredHeight : this.layout.stacked ? 36 : 22;
+        const accessoryTop = Math.ceil(headerHeight + 3);
+        this.host.style.setProperty('--vela-statusline-accessory-top', `${accessoryTop}px`);
+        const topAdjustment = this.appearance === 'terminal' ? -4 : 0;
+        this.host.style.setProperty('--vela-statusline-legend-offset', `${Math.ceil(accessoryTop + accessoryHeight + 3 + topAdjustment)}px`);
     }
 
     /** Project the parts config onto the segments (the baseline fit() prunes from). */
@@ -462,7 +580,10 @@ export class Statusline {
             this.applyLayout(rung);
             if (!hasValues || !overflows()) break;
         }
-        if (!this.fitMode) return;
+        if (!this.fitMode) {
+            this.syncAccessoryLayout();
+            return;
+        }
         const order: Array<[HTMLElement, boolean]> = [
             [this.valuesRow, hasValues],
             [this.metaEl, seg.meta],
@@ -475,6 +596,7 @@ export class Statusline {
         // With the values row gone the chip is one line again — un-stack so the legend
         // shift drops back to a single line's.
         if (this.valuesRow.style.display === 'none') this.applyLayout({ ...this.layout, stacked: false });
+        this.syncAccessoryLayout();
     }
 
     /** Shape + color the value readout after the active price style: its own up/down
@@ -494,8 +616,24 @@ export class Statusline {
 
     /** The "· BINANCE · 1h" segment after the symbol — venue first, then resolution. */
     setMeta(timeframe: string, provider: string): void {
-        this.metaEl.textContent = `${provider ? `· ${provider.toUpperCase()} ` : ''}· ${timeframeLabel(timeframe)}`;
+        this.metaTimeframe = timeframe;
+        this.metaProvider = provider;
+        this.renderMeta();
         this.fit();
+    }
+
+    private renderMeta(): void {
+        if (this.appearance === 'standard') {
+            this.metaEl.textContent = `${this.metaProvider ? `· ${this.metaProvider.toUpperCase()} ` : ''}· ${timeframeLabel(this.metaTimeframe)}`;
+            return;
+        }
+        const interval = /^\d+$/.test(this.metaTimeframe) ? this.metaTimeframe : timeframeLabel(this.metaTimeframe);
+        this.metaEl.replaceChildren(...[interval, this.metaProvider.toUpperCase()].filter(Boolean).map((text) => {
+            const part = this.el.ownerDocument.createElement('span');
+            part.className = 'vela-sl-meta-part';
+            part.textContent = text;
+            return part;
+        }));
     }
 
     /** Dress the market badge for a session state: its icon, tinted circle, and the
@@ -513,10 +651,19 @@ export class Statusline {
         this.dressBadge();
     }
 
+    /** Present host-controlled replay while retaining the native controller's own state. */
+    setExternalReplaying(active: boolean): void {
+        if (this.destroyed || active === this.externalReplaying) return;
+        this.externalReplaying = active;
+        this.dressBadge();
+        this.fit();
+    }
+
     private dressBadge(): void {
-        this.marketBubble.el.hidden = this.replaying;
-        this.replayBadge.hidden = !this.replaying;
-        if (this.replaying) {
+        const replaying = this.replaying || this.externalReplaying;
+        this.marketBubble.el.hidden = replaying;
+        this.replayBadge.hidden = !replaying;
+        if (replaying) {
             this.marketEl.dataset.status = 'replay';
             this.marketTip.setContent(REPLAY_LABEL);
             return;
@@ -604,21 +751,33 @@ export class Statusline {
     /** (Re)bind to a chart instance — called after every widget rebuild. */
     onChart(chart: Vela): void {
         this.detach();
-        this.lastBar = null;
+        this.lastBar = chart.latestBar ?? null;
         this.hoverBar = null;
         this.unsubs.push(
+            chart.on('data:changed', ({ lastBar }) => {
+                this.lastBar = lastBar;
+                this.hoverBar = null;
+                this.render();
+            }),
+            chart.on('load:start', () => {
+                this.lastBar = null;
+                this.hoverBar = null;
+                this.render();
+            }),
             chart.on('bar', (b: OHLCV) => {
                 this.lastBar = b;
                 if (!this.hoverBar) this.render();
             }),
             // A replay cut or restore replaces the newest bar without a `bar` event.
             chart.on('replay:start', () => {
-                this.lastBar = null;
+                this.lastBar = chart.latestBar ?? null;
+                this.hoverBar = null;
                 this.setReplaying(true);
                 this.render();
             }),
             chart.on('replay:end', () => {
-                this.lastBar = null;
+                this.lastBar = chart.latestBar ?? null;
+                this.hoverBar = null;
                 this.setReplaying(false);
                 this.render();
             }),
@@ -632,7 +791,11 @@ export class Statusline {
     }
 
     destroy(): void {
+        if (this.destroyed) return;
+        this.destroyed = true;
+        this.externalReplaying = false;
         this.detach();
+        this.detachAccessory();
         this.fitRO?.disconnect();
         this.fitRO = null;
         this.el.ownerDocument.fonts?.removeEventListener('loadingdone', this.onFontsLoaded);
@@ -643,6 +806,7 @@ export class Statusline {
         this.eyeTip.destroy();
         this.marketBubble.destroy();
         this.host.classList.remove('vela-has-statusline', 'vela-sl-stacked-host'); // the legend shift leaves with the line
+        this.host.removeAttribute(LEGEND_APPEARANCE_ATTR);
         this.el.remove();
     }
 

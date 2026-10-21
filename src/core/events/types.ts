@@ -77,6 +77,8 @@ export interface VelaEventMap extends Record<string, unknown> {
   "pane:moved": { paneId: string; dir: "up" | "down" };
   /** A user drawing was created (interactively or via `chart.drawings.add`). */
   "drawing:created": { id: string };
+  /** Drawing document changed, including undo/redo and document replacement. */
+  "drawing:changed": Record<string, never>;
   /** An interactive placement is in progress — the ghost's current shape after each
    *  anchor click / cursor move, `null` when placement ends (finalized or
    *  cancelled). Transient: nothing is in the store yet. Multi-chart hosts mirror
@@ -129,6 +131,9 @@ export interface VelaEventMap extends Record<string, unknown> {
   "context:changed": { id: string };
   /** A live tick: the forming bar was updated or a new bar appended (a bar revealed by replay included). */
   bar: OHLCV;
+  /** A full source series was replaced, cleared, or cut/restored by replay. Hidden
+   *  replay bars never appear here. Live updates use `bar` instead. */
+  "data:changed": { lastBar: OHLCV | null };
   /**
    * The visible time range moved (pan/zoom/fit — fires per applied change, NOT
    * debounced; the engine re-run debounce is separate). Payload = `{from, to}` in

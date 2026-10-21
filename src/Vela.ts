@@ -6,6 +6,7 @@ import type { VelaOptions, VelaTheme, ThemeName, MarketSwitch, MarketSnapshot, A
 import { resolveAnimations } from './core/options';
 import type { InputValue } from './core/model/inputs';
 import type { IndicatorHandle } from './core/IndicatorHandle';
+import type { OHLCV } from './core/model/ohlcv';
 import type { EngineContextSnapshot } from './core/ports/ScriptingEngine';
 import type { NativeIndicatorInfo } from './core/native-indicators';
 import type { VelaEventMap } from './core/events/types';
@@ -313,6 +314,13 @@ export class Vela {
      *  new bars land). Listen to `market:changed` for committed identity changes. */
     get market(): MarketSnapshot {
         return this.orchestrator.marketSnapshot();
+    }
+
+    /** A copy of the newest loaded source bar, or null while empty/loading. During
+     *  replay this is the newest revealed bar; queued future bars stay hidden.
+     *  Subscribe to `data:changed` for replacements and `bar` for live updates. */
+    get latestBar(): OHLCV | null {
+        return this.orchestrator.latestBar();
     }
 
     /** Resolves once the chart is painted and interactive. For a symbol-backed chart this

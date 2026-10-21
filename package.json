@@ -1,5 +1,7 @@
 {
   "name": "@luxalgo/vela",
+  "private": true,
+  "localReplayStudio": "Local-only fork application; upstream library attribution and license retained.",
   "version": "0.8.5",
   "description": "The open-source core of Vela by LuxAlgo: a charting library with a native high-performance renderer, drawing tools, pluggable chart types and pluggable scripting engines.",
   "keywords": [
@@ -89,28 +91,54 @@
     "build": "tsup",
     "prepare": "tsup",
     "dev": "tsup --watch",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p local-app/tsconfig.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "eslint .",
-    "playground": "vite"
+    "playground": "vite",
+    "local:build": "vite build --config local-app/vite.config.ts",
+    "local:start": "node local-app/launch.mjs",
+    "local:dev": "node local-app/launch.mjs --mode develop",
+    "local:server": "tsx local-app/server/index.ts",
+    "local:ui": "vite --config local-app/vite.config.ts",
+    "local:test": "vitest run local-app/test",
+    "local:mcp": "node --import tsx local-app/mcp.ts",
+    "desktop:build": "node local-app/electron/build.mjs",
+    "desktop:dist": "node local-app/electron/build.mjs --dist",
+    "desktop:start": "electron local-app/electron/staging/app",
+    "desktop:appearance": "node local-app/electron/install-appearance.mjs"
   },
   "devDependencies": {
+    "@types/node": "^24.19.2",
+    "electron": "44.9.2",
+    "electron-builder": "26.15.3",
+    "esbuild": "^0.28.1",
     "eslint": "^9.0.0",
     "jsdom": "^29.1.1",
     "tsup": "^8.0.0",
+    "tsx": "^4.23.15",
     "typescript": "~5.9.3",
     "typescript-eslint": "^8.0.0",
     "vite": "^8.1.5",
     "vitest": "^4.1.0"
   },
   "dependencies": {
+    "@codemirror/autocomplete": "6.20.4",
+    "@codemirror/commands": "6.11.1",
+    "@codemirror/language": "6.13.1",
+    "@codemirror/lint": "6.9.7",
+    "@luxalgo/vela-pinets": "0.2.17",
+    "@modelcontextprotocol/server": "2.3.1",
     "@zag-js/core": "^1.42.0",
     "@zag-js/dialog": "^1.42.0",
     "@zag-js/dom-query": "^1.42.0",
     "@zag-js/menu": "^1.42.0",
     "@zag-js/tooltip": "^1.42.0",
     "@zag-js/types": "^1.42.0",
-    "@zag-js/vanilla": "^1.42.0"
+    "@zag-js/vanilla": "^1.42.0",
+    "codemirror": "6.0.2",
+    "electron-updater": "6.8.9",
+    "pinets": "0.12.0",
+    "zod": "4.6.7"
   }
 }

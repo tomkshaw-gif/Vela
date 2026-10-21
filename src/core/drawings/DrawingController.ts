@@ -87,8 +87,11 @@ export class DrawingController {
             this.port.showToolbar(visible);
             if (seriesGateway) this.port.setSeriesGateway?.(seriesGateway);
             this.subs.push(this.port.onDrawingIntent((i) => this.onIntent(i)));
-            this.subs.push(this.store.onChange(() => this.sync()));
         }
+        this.subs.push(this.store.onChange(() => {
+            this.sync();
+            this.events.emit('drawing:changed', {});
+        }));
     }
 
     /** Whether the active renderer supports interactive drawings. */

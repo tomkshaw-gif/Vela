@@ -9,6 +9,7 @@ import type { ScriptingEngine } from '../core/ports/ScriptingEngine';
 import type { IndicatorManifest, IndicatorLoader } from './indicators';
 import type { VelaStorage } from './persist';
 import type { TopbarComposition } from './topbar-composition';
+import type { RangePreset } from './bottombar';
 
 /** What a shell (widget or workspace) accepts BEYOND the chart options themselves. */
 export interface VelaShellOptions {
@@ -36,6 +37,12 @@ export interface VelaShellOptions {
     statusline?: boolean;
     watermark?: boolean;
     bottombar?: boolean;
+    /** Date-range shortcuts shared by the desktop bar and mobile timeframe drawer. */
+    rangePresets?: readonly RangePreset[];
+    /** Optional date-navigation entry point. Opening it never changes the visible range itself. */
+    onDateJump?: () => void;
+    /** Hide session switches when the host's provider cannot filter market sessions. Default true. */
+    sessionControls?: boolean;
     /** Declarative topbar composition: `{ left, right }` lists of the VISIBLE entries,
      *  in render order — built-in ids (`'symbol'`, `'timeframes'`, `'style'`,
      *  `'layout'`, `'indicators'`, `'actions'`, `'undo-redo'`, `'alerts'`, `'panels'`,

@@ -6,7 +6,7 @@ import type { SeriesSpec, LineLikeSeries, CandleSeries, LineStyle, CandleBarColo
 import { isLineLikeSeries, seriesShownOn } from '../../../core/model/series';
 import type { CoordinateSystem } from '../core/CoordinateSystem';
 import type { SceneGraph, PaneNode } from '../core/SceneGraph';
-import { candleTier, wickWidth, candleGeometry, snapY, aggregateCandleColumns } from './candle-lod';
+import { candleTier, wickWidth, candleGeometry, snapY, aggregateCandleColumns, terminalCandleGeometry, rasterizeTerminalCandles, type TerminalCandle } from './candle-lod';
 import { BASELINE_TOP_LINE, BASELINE_BOTTOM_LINE, BASELINE_FILL_ALPHA, BASELINE_FILL_ALPHA_FAR, withAlpha as cssWithAlpha, effectiveCandlePaint } from '../core/chartConfig';
 import type { IRenderBackend } from './IRenderBackend';
 import { Batch, type RGBA } from './gl/Batch';
@@ -866,6 +866,30 @@ export class WebGL2Backend implements IRenderBackend {
         const up = paint.up;
         const down = paint.down;
         const cs = paint.candle;
+        if (scene.candleRasterization === 'terminal') {
+            const candles: TerminalCandle<RGBA>[] = [];
+            const ratio = coords.dpr;
+            for (let i = i0; i <= i1; i += 1) {
+                const bar = bars[i];
+                if (!bar) continue;
+                const isUp = bar.close >= bar.open;
+                const direction = isUp ? up : down;
+                const color = barColors.get(bar.time) ?? direction;
+                candles.push({ geometry: terminalCandleGeometry(coords.logicalToX(i), spacing,
+                    coords.priceToY(bar.open, pane.scale, pane.bounds), coords.priceToY(bar.close, pane.scale, pane.bounds),
+                    coords.priceToY(bar.high, pane.scale, pane.bounds), coords.priceToY(bar.low, pane.scale, pane.bounds),
+                    ratio, ratio, this.candleBodyScale), color: parseColor(color),
+                    borderColor: parseColor((isUp ? cs.borderUpColor : cs.borderDownColor) ?? color),
+                    wickColor: parseColor((isUp ? cs.wickUpColor : cs.wickDownColor) ?? direction),
+                    hollow: isUp && Boolean(cs.hollowUp) });
+            }
+            rasterizeTerminalCandles(candles, { bodyVisible: cs.bodyVisible, borderVisible: cs.borderVisible,
+                wickVisible: cs.wickVisible, inverted: pane.scale.invert === true }, (x, y, width, height, color, body) => {
+                b.alpha = body ? this.candleBodyAlpha : this.candleStructureAlpha;
+                b.rect(x / ratio, y / ratio, width / ratio, height / ratio, color);
+            });
+            return;
+        }
         if (tier === 'aggregate') {
             // The stick IS the candle, so a bar's paint resolves as in the stick-only tier
             // below: the wick color setting wins, then barcolor(), then the direction color.
@@ -919,7 +943,8 @@ export class WebGL2Backend implements IRenderBackend {
                 }
             }
             if (drawBody) {
-                if (cs.bodyVisible) {
+                const bodyVisible = cs.bodyVisible && !(isUp && cs.hollowUp);
+                if (bodyVisible) {
                     b.alpha = this.candleBodyAlpha;
                     b.rect(g.bodyX, bodyTop, g.bodyW, bodyH, c);
                 }
@@ -927,7 +952,7 @@ export class WebGL2Backend implements IRenderBackend {
                 // forces one. An unconfigured border color inherits the body color, so a
                 // barcolored body gets a matching tinted border, not a direction-colored
                 // outline.
-                if (cs.borderVisible || (fading && cs.bodyVisible)) {
+                if (cs.borderVisible || (fading && bodyVisible)) {
                     b.alpha = this.candleStructureAlpha;
                     const bord = cs.borderVisible ? parseColor((isUp ? cs.borderUpColor : cs.borderDownColor) ?? bodyColorStr) : c;
                     // Inset by half the stroke so the border stays inside the body's

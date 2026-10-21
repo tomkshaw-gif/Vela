@@ -1,0 +1,184 @@
+name: Desktop release
+
+on:
+    push:
+        branches: [main]
+    workflow_dispatch:
+
+permissions:
+    contents: read
+
+# Serialize publication; the publish job also rejects stale SHAs and older versions.
+concurrency:
+    group: desktop-stable
+    cancel-in-progress: false
+
+defaults:
+    run:
+        shell: pwsh
+
+jobs:
+    build:
+        if: >-
+            github.repository == 'tomkshaw-gif/Vela' &&
+            github.ref == 'refs/heads/main'
+        runs-on: windows-latest
+        timeout-minutes: 60
+        outputs:
+            version: ${{ steps.version.outputs.version }}
+            installer_sha256: ${{ steps.assets.outputs.installer_sha256 }}
+            metadata_sha256: ${{ steps.assets.outputs.metadata_sha256 }}
+            blockmap_sha256: ${{ steps.assets.outputs.blockmap_sha256 }}
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  persist-credentials: false
+
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: '24.21.0'
+                  cache: npm
+
+            - name: Generate desktop version
+              id: version
+              run: |
+                  $version = node local-app/electron/release-version.mjs
+                  if ($LASTEXITCODE -ne 0) { throw 'Desktop version generation failed.' }
+                  "version=$version" >> $env:GITHUB_OUTPUT
+                  "VELA_DESKTOP_VERSION=$version" >> $env:GITHUB_ENV
+
+            - run: npm ci
+            - run: npm run typecheck
+            - run: npm run lint
+            - run: npm test -- --maxWorkers=1
+            - run: npm run build
+            - run: npm run local:build
+
+            - name: Build Windows installer without publishing
+              run: npm run desktop:dist -- --publish never
+              env:
+                  CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+            - name: Validate installer and update metadata
+              id: assets
+              run: |
+                  @'
+                  import assert from 'node:assert/strict';
+                  import { createHash } from 'node:crypto';
+                  import { readFileSync, statSync } from 'node:fs';
+                  import { load } from 'js-yaml';
+                  const directory = 'local-app/electron/releases';
+                  const version = process.env.VELA_DESKTOP_VERSION;
+                  const installer = `Vela-Setup-${version}.exe`;
+                  const bytes = readFileSync(`${directory}/${installer}`);
+                  assert.ok(bytes.length > 0, 'The installer must not be empty.');
+                  assert.ok(statSync(`${directory}/${installer}.blockmap`).size > 0, 'The blockmap must not be empty.');
+                  const metadata = load(readFileSync(`${directory}/latest.yml`, 'utf8'));
+                  const sha512 = createHash('sha512').update(bytes).digest('base64');
+                  assert.equal(metadata.version, version);
+                  assert.equal(metadata.path, installer);
+                  assert.equal(metadata.sha512, sha512);
+                  assert.equal(metadata.files.length, 1);
+                  assert.equal(metadata.files[0].url, installer);
+                  assert.equal(metadata.files[0].sha512, sha512);
+                  assert.equal(metadata.files[0].size, bytes.length);
+                  '@ | node --input-type=module
+                  if ($LASTEXITCODE -ne 0) { throw 'Installer/update metadata validation failed.' }
+                  $directory = 'local-app/electron/releases'
+                  "installer_sha256=$((Get-FileHash "$directory/Vela-Setup-$env:VELA_DESKTOP_VERSION.exe" -Algorithm SHA256).Hash)" >> $env:GITHUB_OUTPUT
+                  "metadata_sha256=$((Get-FileHash "$directory/latest.yml" -Algorithm SHA256).Hash)" >> $env:GITHUB_OUTPUT
+                  "blockmap_sha256=$((Get-FileHash "$directory/Vela-Setup-$env:VELA_DESKTOP_VERSION.exe.blockmap" -Algorithm SHA256).Hash)" >> $env:GITHUB_OUTPUT
+
+            # Only these three public outputs cross into the write-permission job.
+            - uses: actions/upload-artifact@v4
+              with:
+                  name: desktop-windows-${{ steps.version.outputs.version }}
+                  if-no-files-found: error
+                  compression-level: 0
+                  retention-days: 7
+                  path: |
+                      local-app/electron/releases/Vela-Setup-${{ steps.version.outputs.version }}.exe
+                      local-app/electron/releases/Vela-Setup-${{ steps.version.outputs.version }}.exe.blockmap
+                      local-app/electron/releases/latest.yml
+
+    publish:
+        needs: build
+        if: >-
+            github.repository == 'tomkshaw-gif/Vela' &&
+            github.ref == 'refs/heads/main'
+        runs-on: windows-latest
+        timeout-minutes: 15
+        permissions:
+            contents: write
+        env:
+            VELA_DESKTOP_VERSION: ${{ needs.build.outputs.version }}
+        steps:
+            # No checkout, dependency installation, or execution of application code here.
+            - uses: actions/download-artifact@v4
+              with:
+                  name: desktop-windows-${{ needs.build.outputs.version }}
+                  path: release-assets
+
+            - name: Verify the gated assets
+              env:
+                  INSTALLER_SHA256: ${{ needs.build.outputs.installer_sha256 }}
+                  METADATA_SHA256: ${{ needs.build.outputs.metadata_sha256 }}
+                  BLOCKMAP_SHA256: ${{ needs.build.outputs.blockmap_sha256 }}
+              run: |
+                  $installer = "Vela-Setup-$env:VELA_DESKTOP_VERSION.exe"
+                  $expected = @{
+                      $installer = $env:INSTALLER_SHA256
+                      "$installer.blockmap" = $env:BLOCKMAP_SHA256
+                      'latest.yml' = $env:METADATA_SHA256
+                  }
+                  if (@(Get-ChildItem -LiteralPath release-assets -Force).Count -ne 3) { throw 'Expected exactly three release assets.' }
+                  foreach ($name in $expected.Keys) {
+                      if ($expected[$name] -notmatch '^[A-F0-9]{64}$') { throw "Missing gated hash for $name." }
+                      if ((Get-FileHash -LiteralPath "release-assets/$name" -Algorithm SHA256).Hash -cne $expected[$name]) {
+                          throw "Release asset differs from the gated build: $name"
+                      }
+                  }
+
+            - name: Publish complete stable GitHub release
+              env:
+                  GH_TOKEN: ${{ github.token }}
+              run: |
+                  $repository = 'tomkshaw-gif/Vela'
+                  $version = $env:VELA_DESKTOP_VERSION
+                  if ($version -notmatch '^[1-9][0-9]*\.(0|[1-9][0-9]*)\.[1-9][0-9]*$') { throw 'Invalid stable desktop version.' }
+                  $tag = "desktop-v$version"
+                  $currentMain = gh api "repos/$repository/git/ref/heads/main" --jq '.object.sha'
+                  if ($LASTEXITCODE -ne 0) { throw 'Could not verify the current main SHA.' }
+                  if ($currentMain -cne $env:GITHUB_SHA) { throw 'Main has advanced; release the newer run instead.' }
+                  $publishedTags = @(gh api "repos/$repository/releases?per_page=100" --paginate --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name')
+                  if ($LASTEXITCODE -ne 0) { throw 'Could not verify published desktop versions.' }
+                  foreach ($publishedTag in $publishedTags) {
+                      if ($publishedTag -notlike 'desktop-v*') { continue }
+                      $publishedVersion = $publishedTag.Substring('desktop-v'.Length)
+                      if ($publishedVersion -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') { throw "Unrecognized stable desktop tag: $publishedTag" }
+                      if ([version]$publishedVersion -ge [version]$version) { throw "Desktop $version does not advance $publishedTag." }
+                  }
+                  $installer = "release-assets/Vela-Setup-$version.exe"
+                  # Creating the ref explicitly refuses collisions instead of reusing a tag at another SHA.
+                  gh api --method POST "repos/$repository/git/refs" -f "ref=refs/tags/$tag" -f "sha=$env:GITHUB_SHA" --silent
+                  if ($LASTEXITCODE -ne 0) { throw 'Could not create the exact release tag. Rerun all jobs to generate a new version.' }
+                  gh release create $tag $installer "$installer.blockmap" 'release-assets/latest.yml' --repo $repository --verify-tag --title "Vela $version" --notes "Windows desktop installer from commit $env:GITHUB_SHA." --draft
+                  if ($LASTEXITCODE -ne 0) { throw 'Draft creation or asset upload failed; the release remains unpublished.' }
+                  $draftJson = gh release view $tag --repo $repository --json isDraft,isPrerelease,assets
+                  if ($LASTEXITCODE -ne 0) { throw 'Could not verify the uploaded draft.' }
+                  $draft = $draftJson | ConvertFrom-Json
+                  $expected = @("Vela-Setup-$version.exe", "Vela-Setup-$version.exe.blockmap", 'latest.yml')
+                  if (!$draft.isDraft -or $draft.isPrerelease -or @($draft.assets).Count -ne 3) { throw 'Unexpected draft release state.' }
+                  if (@(Compare-Object $expected @($draft.assets.name)).Count -ne 0) { throw 'Draft is missing a required update asset.' }
+                  foreach ($asset in $draft.assets) {
+                      if ($asset.state -ne 'uploaded' -or $asset.size -le 0) { throw "Incomplete uploaded asset: $($asset.name)" }
+                  }
+                  gh release edit $tag --repo $repository --draft=false --latest
+                  if ($LASTEXITCODE -ne 0) { throw 'Could not publish the complete release.' }
+                  $publishedJson = gh release view $tag --repo $repository --json isDraft,isPrerelease,url
+                  if ($LASTEXITCODE -ne 0) { throw 'Could not verify the published release.' }
+                  $published = $publishedJson | ConvertFrom-Json
+                  if ($published.isDraft -or $published.isPrerelease) { throw 'The release is not public and stable.' }
+                  $latestTag = gh api "repos/$repository/releases/latest" --jq '.tag_name'
+                  if ($LASTEXITCODE -ne 0 -or $latestTag -cne $tag) { throw 'The desktop release is not the latest stable release.' }
+                  "Published [$tag]($($published.url)) from commit $env:GITHUB_SHA." >> $env:GITHUB_STEP_SUMMARY

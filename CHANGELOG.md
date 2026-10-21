@@ -2,6 +2,83 @@
 
 All notable changes to Vela, newest first.
 
+## [Unreleased]
+
+### Added
+
+- **Windows desktop application.** Open the installed workspace from Run Vela,
+  keep Develop Vela for fast local edits, and receive saved-workspace updates from
+  the fork's stable releases. Sessions, cached candles, private appearance and
+  encrypted provider settings stay on the computer across upgrades.
+
+- **Compact in-chart controls.** Source-sized symbol/OHLC and indicator legends,
+  replay badge and simulated quote row with synchronized quantity and quick
+  market orders. The chart reserves the row's measured height; prices use only
+  the last revealed candle, and unavailable prices stay inert.
+
+- **Pine editor and strategy testing.** Write and save Pine scripts with version
+  history, run them on charts and backtest all revealed cached history. Review
+  performance, trades and simulations, then save or export a reproducible run.
+  Deep Backtesting selects a separate cached date range without advancing replay.
+- **Reusable chart templates.** Save indicator sets, chart appearance and layouts.
+  Native custom intervals, synchronization and grids up to sixteen charts remain
+  available alongside the compact editor and results dock.
+- **Local AI chart connection.** Connect an MCP-capable assistant to read revealed
+  candles and chart images, work across resolutions, inspect native studies and
+  create or edit drawings. Requests target one open session and save chart edits.
+  Capture a region, analyse unplotted studies, inspect session and saved-result
+  context, or open the shared strategy tester for an exact chart strategy.
+- **Playback controls within reach.** Play, pause, stop, step and fast-forward from
+  an optional strip with date/session navigation and source-bar interval selection.
+  Closing it pauses playback. Change speed while a bar is loading without
+  duplicating playback.
+- **Calendar starts and session jumps.** Choose a replay date and time, jump to
+  London or New York hours, or move to the next day. Local time zones handle
+  daylight saving, and skipped candles still process simulated orders and rules.
+- **Drawing favourites bar.** Keep starred tools within reach on a compact
+  bottom-docked bar. Drag its handle or use arrow keys to float it; your choices
+  and position survive session changes.
+- **Compact chart controls.** Use favorite timeframes, templates, local save status,
+  a cached-session watchlist and grouped drawing utilities. Lock, hide or delete
+  drawings with undo. The light monochrome appearance includes a native gradient
+  export and hollow rising candles, while retaining saved custom appearances.
+- **Direct chart navigation.** Use normalized mouse and trackpad wheel input,
+  discrete zoom steps, modifier-based cursor anchoring and distance-based axis
+  scaling. Reset the time axis without losing a manual price scale.
+- **Resizable replay results.** Drag the shared lower panel, remember its height,
+  collapse it to its tabs or maximize it. Replay Trading shares the region with
+  Pine Editor and Strategy Tester, with clearer statistics and a local canvas
+  equity chart when the optional asset is present.
+- **Compact simulated order ticket.** Select a side, switch between market, limit
+  and stop orders, adjust prices by instrument ticks and enable protective exits
+  before submitting one described order. Preview or amend working entry and exit
+  prices directly on the chart; release commits and Escape cancels a drag.
+- **Sharper candle rendering.** Both native backends support nonlinear candle
+  widths and device-pixel-aligned bodies, borders and wicks. The local light
+  preset uses 12-pixel axis text while retaining custom appearances.
+- **Native chart workspace.** Practice in Vela's standard full-screen chart with
+  a compact replay strip and optional Trade panel. Manage saved sessions, data
+  and results on a separate page.
+- **Two desktop launch modes.** Open an optimized local app for practice or a
+  development view for code changes. Successful updates pause playback, save the
+  open workspace and reconnect to the selected session. Failed updates keep the
+  current version available.
+- **Saved local practice sessions.** Replay historical futures data, place simulated
+  orders with protective exits, resume your account and chart setup, and export a
+  complete local backup. Review trade results and simulated outcome distributions.
+- **Configurable challenge practice.** Set profit targets, daily loss limits, static
+  or trailing drawdown, contract limits and trading-day requirements. Each attempt
+  keeps its own account and rule results.
+- **Private historical-data connection.** Connect a locally stored Databento key,
+  review a zero-dollar estimate before a download, and reuse cached candles. The
+  application runs on localhost and keeps credentials out of browser responses.
+
+### Fixed
+
+- Cached replay OHLC values remain available after loading, replacing data and
+  leaving the plot. Indicators report synchronous execution errors instead of
+  remaining in a loading state.
+
 ## [0.8.5]
 
 ### Added

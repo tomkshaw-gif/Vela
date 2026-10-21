@@ -1029,6 +1029,21 @@ export class ChartCell {
         this.statusline?.setFitMode(on);
     }
 
+    /** Choose the price and indicator legend typography for this cell. */
+    setStatuslineAppearance(appearance: 'standard' | 'terminal'): void {
+        this.statusline?.setAppearance(appearance);
+    }
+
+    /** Present replay supplied by a host controller without starting native bar replay. */
+    setExternalReplaying(active: boolean): void {
+        this.statusline?.setExternalReplaying(active);
+    }
+
+    /** Mount a host-owned row below the price readout, reserving its measured height. */
+    mountStatuslineAccessory(element: HTMLElement): () => void {
+        return this.statusline?.attachAccessory(element) ?? (() => {});
+    }
+
     /** The workspace shell keeps the app theme; the cell host's tokens re-derive from
      *  the LIVE plot surface for overlay ink (statusline, watermark). Menus portal to
      *  `.vela-ui` and keep the app-theme surface (see {@link applyPlotOverlayTokens}). */

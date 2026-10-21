@@ -1623,6 +1623,86 @@ describe('EngineOrchestrator — loading placeholder + legend status', () => {
         expect(renderer.statuses[renderer.statuses.length - 1]).toEqual({ id: ind.id, status: 'loading' });
     });
 
+    it('reports a synchronous execute throw after preparation and stops the loading spinner', async () => {
+        const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+        const failure = new Error('execute threw after prepare');
+        class ThrowingEngine extends MockEngine {
+            executions = 0;
+            override execute(_req: ExecutionRequest, _handlers: ExecutionHandlers): ExecutionSession {
+                this.executions += 1;
+                throw failure;
+            }
+        }
+        const renderer = new FakeRenderer();
+        const engine = new ThrowingEngine();
+        const chart = new Vela({} as unknown as HTMLElement, { live: false, volume: false }, { renderer, engines: [engine], dataFeed: new MockDataFeed() });
+        const chartErrors: Error[] = [];
+        const handleErrors: Error[] = [];
+        chart.on('indicator:error', (event) => chartErrors.push(event.error));
+        try {
+            const ind = chart.addIndicator('//@version=5\nindicator("Throw")\nplot(close)');
+            ind.on('error', (event) => handleErrors.push(event.error));
+            await chart.ready();
+            await flush();
+            expect(engine.executions).toBe(1);
+            expect(chartErrors).toEqual([failure]);
+            expect(handleErrors).toEqual([failure]);
+            expect(renderer.statuses).toContainEqual({ id: ind.id, status: 'loading' });
+            expect(renderer.statuses[renderer.statuses.length - 1]).toEqual({ id: ind.id, status: 'idle' });
+            expect(renderer.removed).toHaveLength(0);
+            ind.remove();
+            expect(renderer.removed).toContain(ind.id);
+        } finally {
+            chart.destroy();
+            logged.mockRestore();
+        }
+    });
+
+    it.each(['remove', 'supersede'] as const)('ignores an execute throw after reentrant %s takes ownership', async (action) => {
+        const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+        let duringExecute = (): void => {};
+        class ReentrantEngine extends MockEngine {
+            executions = 0;
+            override execute(req: ExecutionRequest, handlers: ExecutionHandlers): ExecutionSession {
+                this.executions += 1;
+                if (this.executions === 1) {
+                    duringExecute();
+                    throw new Error('superseded execution failed');
+                }
+                return super.execute(req, handlers);
+            }
+        }
+        const renderer = new FakeRenderer();
+        const engine = new ReentrantEngine();
+        const chart = new Vela({} as unknown as HTMLElement, { live: false, volume: false }, { renderer, engines: [engine], dataFeed: new MockDataFeed() });
+        const errors: Error[] = [];
+        chart.on('indicator:error', (event) => errors.push(event.error));
+        try {
+            const source = '//@version=5\nindicator("Original")\nplot(close)';
+            const ind = chart.addIndicator(source);
+            let replacement: Promise<unknown> | undefined;
+            duringExecute = () => {
+                if (action === 'remove') ind.remove();
+                else replacement = ind.updateCode(`${source}\n// replacement`);
+            };
+            await chart.ready();
+            await flush();
+            expect(engine.executions).toBe(action === 'remove' ? 1 : 2);
+            expect(errors).toEqual([]);
+            if (action === 'remove') {
+                expect(chart.indicators()).toHaveLength(0);
+                expect(renderer.removed).toContain(ind.id);
+            } else {
+                await expect(replacement).resolves.toMatchObject({ ok: true });
+                expect(ind.source).toBe(`${source}\n// replacement`);
+                expect(renderer.statuses[renderer.statuses.length - 1]).toEqual({ id: ind.id, status: 'idle' });
+            }
+        } finally {
+            chart.destroy();
+            logged.mockRestore();
+        }
+    });
+
     it('a failed compute stops the spinner and keeps the legend row (removable)', async () => {
         const err = vi.spyOn(console, 'error').mockImplementation(() => {});
         const renderer = new FakeRenderer();

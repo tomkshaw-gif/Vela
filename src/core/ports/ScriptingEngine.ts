@@ -98,6 +98,9 @@ export interface ExecutionMarket {
  * tick (only requested when `capabilities.streaming`).
  */
 export interface ExecutionRequest {
+    /** Capture the chart-owned identity when a run is actually dispatched. Engines that
+     * expose context snapshots return that identity only after the run has completed. */
+    getComputation?: () => EngineComputationIdentity;
     prepared: PreparedScript;
     market: ExecutionMarket;
     /** The initial bar snapshot. */
@@ -149,6 +152,20 @@ export type BarsChangeReason = 'backfill' | 'complete';
 /** A running execution — the control surface the orchestrator drives. */
 /** A read-only, serializable snapshot of a running script's execution context. */
 export interface EngineContextSnapshot {
+    /** Native snapshots contain numeric series only. Renderer-layer payloads and
+     * nonnumeric series remain opaque and are reported explicitly. */
+    native?: {
+        type: string;
+        outputKind: 'series' | 'renderer' | 'mixed' | 'empty';
+        unsupportedSeries: number;
+        hidden: boolean;
+    };
+    /** Identifies the settings and data that actually produced this snapshot. */
+    computation?: {
+        state: 'ready' | 'pending' | 'stale';
+        requested: EngineComputationIdentity;
+        completed?: EngineComputationIdentity;
+    };
     language: string;
     /** 'computing' while a static run is in flight, 'streaming' on a live session, 'idle' after done/stop. */
     phase: 'idle' | 'computing' | 'streaming';
@@ -174,6 +191,20 @@ export interface EngineContextSnapshot {
      *  explicitly — a deep backtest's ledger is large. */
     trades?: StrategyTrade[];
     warnings: EngineWarning[];
+}
+
+/** A copied execution identity. `id` is scoped to an indicator's chart lifetime;
+ * a data revision changes even when a forming bar retains the same timestamp. */
+export interface EngineComputationIdentity {
+    id: string;
+    source: string;
+    /** Optional engine-side reveal cutoff, captured before dispatching the run. */
+    dataCutoff?: number | null;
+    inputs: Record<string, InputValue>;
+    props: Record<string, InputValue>;
+    market: ExecutionMarket;
+    bars: { revision: number; count: number; firstTime: number | null; lastTime: number | null };
+    visibleRange?: VisibleBarRange;
 }
 
 /** Keys a caller may restrict a context snapshot to (limits worker structured-clone cost). */
@@ -210,7 +241,7 @@ export interface ScriptingEngine {
     readonly language: string;
     readonly capabilities: EngineCapabilities;
     /** Parse a script: extract its inputs schema + declaration metadata. No market data. */
-    prepare(source: string, instanceId: string): Promise<PreparedScript>;
+    prepare(source: string, instanceId: string, options?: { signal?: AbortSignal }): Promise<PreparedScript>;
     /** Execute (static or live). Returns a session control handle. */
     execute(req: ExecutionRequest, handlers: ExecutionHandlers): ExecutionSession;
 }

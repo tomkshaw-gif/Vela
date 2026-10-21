@@ -11,7 +11,7 @@ import type { VelaTheme, MarketConfig, MarketSwitch, MarketSnapshot, AddIndicato
 import type { PaneController } from '../PanesControl';
 import type { PaneAction } from '../ports/IChartRenderer';
 import type { CodeUpdateResult, IndicatorHandle } from '../IndicatorHandle';
-import type { ContextSelect, EngineContextSnapshot } from '../ports/ScriptingEngine';
+import type { ContextSelect, EngineContextSnapshot, EngineComputationIdentity } from '../ports/ScriptingEngine';
 import type { ScriptRun, ScriptRunCause } from '../script-run';
 import type { StrategyTrade } from '../model/strategy';
 import type { VelaEventMap } from '../events/types';
@@ -134,6 +134,15 @@ export class EngineOrchestrator implements IndicatorController, PaneController, 
      * price style (Heikin Ashi) it's the derived series, index-aligned 1:1 with the raw one.
      */
     private bars: OHLCV[] = [];
+    private barsRevision = 0;
+    private computationSerial = 0;
+    private destroyed = false;
+    private readonly preparations = new WeakMap<IndicatorRecord, { controller: AbortController; engine: ScriptingEngine }>();
+    private readonly executions = new WeakMap<IndicatorRecord, object>();
+    private readonly computations = new WeakMap<IndicatorRecord, { key: string; identity: EngineComputationIdentity }>();
+    private readonly computationViewports = new WeakMap<IndicatorRecord, { prepared: PreparedScript; range?: VisibleBarRange }>();
+    private readonly nativeComputations = new WeakMap<IndicatorRecord, EngineComputationIdentity>();
+    private readonly nativeContexts = new WeakMap<IndicatorRecord, { plots: EngineContextSnapshot['plots']; completed?: EngineComputationIdentity; unsupportedSeries: number; renderer: boolean }>();
     /** The RAW market data, exactly as the feed served it — the source of truth. The `'bar'`
      *  event, gap-heal reconciliation, and `chart.data` stay on this plane; nothing synthetic
      *  is ever stored or emitted as data. */
@@ -176,6 +185,8 @@ export class EngineOrchestrator implements IndicatorController, PaneController, 
     /** A start is loading older history before it can cut; `seek` = a replay was running
      *  (and left silently to deepen), so abandoning the load must announce its end. */
     private replayLoading: { seek: boolean } | null = null;
+    /** A seek may borrow full history before its new cut lands. Readouts keep the old cut. */
+    private replayReadoutCutoff: number | null = null;
     /** A replay carried over a timeframe/session switch, between the old series' silent end
      *  and the cut of the new one: still ACTIVE for the outside (`replayState`), resumed
      *  at `revealedEnd` once the new bars land, unless stopped (`cancelled`) meanwhile. */
@@ -394,8 +405,9 @@ export class EngineOrchestrator implements IndicatorController, PaneController, 
                 // range-aware indicators re-run / refetch with the new window
                 if (record.session && record.prepared?.reactsToViewport) {
                     record.pendingCause = 'viewport';
+                    this.computationViewports.set(record, { prepared: record.prepared, range: { ...window } });
                     record.session.setVisibleRange(window);
-                } else if (record.native?.descriptor.reactsToViewport) record.native.instance.onViewport({ from: window.left, to: window.right });
+                } else if (record.native?.descriptor.reactsToViewport) this.runNative(record, () => record.native!.instance.onViewport({ from: window.left, to: window.right }));
             }
             // An active chart-type data engine streams in newly-visible data as the user scrolls.
             if (this.activeEngineStyle) this.typeEngines.get(this.activeEngineStyle)?.onViewport?.({ from: window.left, to: window.right });
@@ -738,6 +750,16 @@ export class EngineOrchestrator implements IndicatorController, PaneController, 
             else if (next.visibleRange) this.renderer.setVisibleRange(next.visibleRange);
             return;
         }
+        if (identityChanged) for (const record of this.registry.all()) {
+            this.cancelPreparation(record);
+            this.executions.delete(record);
+            record.session?.stop();
+            record.session = undefined;
+            if (record.pendingSource !== undefined) {
+                record.pendingSource = undefined;
+                this.settleCode(record, { ok: false, error: new Error('[vela] Code preparation was cancelled by a market change.') });
+            }
+        }
         const prev = { symbol: m.symbol ?? 'TEST', timeframe: m.timeframe ?? '60' };
         // A SESSION-ONLY flip (RTH↔ETH) changes WHICH bars exist but not the time axis:
         // the user's zoom/position carries over to the reload — captured here, before the
@@ -878,7 +900,12 @@ export class EngineOrchestrator implements IndicatorController, PaneController, 
             this.restartChartTypeEngine();
             this.reexecuteIndicators();
         }
-        if (depthOnly) this.releaseHeldNatives();
+        if (depthOnly) {
+            // A synchronous trim completes while market switching suppresses the
+            // history notification. Release its one rerun after that fence clears.
+            if (this.historyState !== 'backfill') this.notifySessionsBars('complete');
+            this.releaseHeldNatives();
+        }
         if (!replayBack) this.startLive(); // stopped above on every path, depth-only included
         if (identityChanged) {
             this.events.emit('market:changed', { symbol: m.symbol ?? 'TEST', timeframe: m.timeframe ?? '60', prev });
@@ -957,8 +984,8 @@ export class EngineOrchestrator implements IndicatorController, PaneController, 
      * renderer re-derives each model's anchor offset against the new indices, negative when
      * the head moved forward).
      *
-     * Sessions are NOT restarted here: the backfill pokes them per prepend (`'backfill'`), and
-     * a trim leaves every value they already computed valid.
+     * Sessions are NOT restarted here: the backfill pokes them per prepend (`'backfill'`),
+     * and the completed trim re-runs over the retained history after the switch fence clears.
      */
     private extendDepth(gen: number, requested: number): void {
         if (this.rawBars.length > requested) {
@@ -1070,6 +1097,7 @@ export class EngineOrchestrator implements IndicatorController, PaneController, 
             const held = this.rawBars.length + (this.replayQueue?.length ?? 0);
             const bars = held + Math.ceil((oldest - opts.from) / this.barIntervalMs()) + 1;
             const seek = this.replayQueue !== null;
+            if (seek) this.replayReadoutCutoff = this.rawBars[this.rawBars.length - 1]?.time ?? null;
             if (seek) this.endReplay(null, { restore: true, resume: false }); // a seek, not an end
             this.replayDepth ??= { bars: this.config.market.bars };
             // Flagged only once the deepening call has read its arguments: its own depth
@@ -1096,6 +1124,7 @@ export class EngineOrchestrator implements IndicatorController, PaneController, 
         this.clearReplayTimer();
         if (!this.replayQueue) this.stopLive();
         this.replayQueue = tape.slice(cut);
+        this.replayReadoutCutoff = null;
         this.setBarSeries(tape.slice(0, cut));
         this.restartBarConsumers({ blank: true });
         if (wasPlaying) this.events.emit('replay:pause', undefined);
@@ -1214,6 +1243,7 @@ export class EngineOrchestrator implements IndicatorController, PaneController, 
         const loading = this.replayLoading;
         if (!loading) return;
         this.replayLoading = null;
+        this.replayReadoutCutoff = null;
         this.replayDepth = null;
         if (loading.seek) this.events.emit('replay:end', { reason });
     }
@@ -1427,6 +1457,7 @@ export class EngineOrchestrator implements IndicatorController, PaneController, 
     private endReplay(reason: ReplayEndReason | null, opts: { restore: boolean; resume: boolean }): void {
         const queue = this.replayQueue;
         if (!queue) return;
+        if (reason) this.replayReadoutCutoff = null;
         this.clearReplayTimer();
         if (opts.restore) this.settleFormingBar();
         else this.replayForming = null;
@@ -1593,6 +1624,7 @@ export class EngineOrchestrator implements IndicatorController, PaneController, 
         if (transform === this.barTransform) return; // singletons per style — identity is enough
         this.barTransform = transform;
         if (this.rawBars.length === 0) return;
+        this.barsRevision += 1;
         this.bars = transform ? transform.full(this.rawBars) : this.rawBars;
         this.renderer.setBars(this.bars, { preserveView: true });
         this.reexecuteIndicators();
@@ -1623,8 +1655,13 @@ export class EngineOrchestrator implements IndicatorController, PaneController, 
     /** Stop + re-run every visible Pine indicator (its input bars changed wholesale). */
     private reexecuteIndicators(): void {
         for (const record of this.registry.all()) {
-            if (record.hidden || !record.session) continue;
-            record.session.stop();
+            if (record.hidden || record.native) continue;
+            if (!record.prepared) {
+                const handle = this.handles.get(record.id);
+                if (handle) void this.startIndicator(record.id, record.source, record.options ?? {}, handle);
+                continue;
+            }
+            record.session?.stop();
             record.session = undefined;
             record.pendingStructural = true; // every value changed → full remount, not a patch
             record.pendingCause = 'market';
@@ -1660,15 +1697,35 @@ export class EngineOrchestrator implements IndicatorController, PaneController, 
      * (engines via `getBars`, natives, visible-range presets) reads `this.bars` — the view.
      */
     private setBarSeries(raw: OHLCV[], opts?: { preserveView?: boolean; clearing?: boolean }): void {
+        this.barsRevision += 1;
         this.rawBars = raw;
         this.bars = this.barTransform ? this.barTransform.full(raw) : raw;
         this.renderer.setBars(this.bars, { preserveView: opts?.preserveView });
+        this.events.emit('data:changed', { lastBar: this.latestBar() });
         // The first PAINTED batch ends the loading state — on a deep history that is the quick
         // preview, well before the load pipeline completes. Only a non-empty series counts: the
         // switch-time CLEARING call says so explicitly, and an empty COMPLETED load is closed
         // by loadMarket's finally instead (a style re-derivation over empty bars mid-load must
         // not end a load still in flight).
         if (!opts?.clearing && this.bars.length > 0) this.endLoad();
+    }
+
+    /** The newest revealed source bar, without the hidden replay queue. */
+    latestBar(): OHLCV | null {
+        const carry = this.replayCarrying;
+        const cutoff = Math.min(this.replayReadoutCutoff ?? Infinity,
+            carry && !carry.cancelled ? carry.revealedEnd - this.barIntervalMs() : Infinity);
+        let end = this.rawBars.length;
+        if (cutoff !== Infinity) {
+            let start = 0;
+            while (start < end) {
+                const middle = (start + end) >>> 1;
+                if (this.rawBars[middle]!.time <= cutoff) start = middle + 1;
+                else end = middle;
+            }
+        }
+        const bar = this.rawBars[end - 1];
+        return bar ? { ...bar } : null;
     }
 
     /**
@@ -1703,6 +1760,7 @@ export class EngineOrchestrator implements IndicatorController, PaneController, 
             }
         } else return;
 
+        this.barsRevision += 1;
         this.renderer.updateBar(viewBar);
         this.events.emit('bar', bar);
         // During a backfill a tick is tagged 'backfill' too — policy-A sessions hold their
@@ -1720,6 +1778,7 @@ export class EngineOrchestrator implements IndicatorController, PaneController, 
         if (this.switchingMarket) return; // old sessions must not run over the incoming market's bars
         // A backfill chunk (or the run released by its completion) is still the script's
         // FIRST look at the history, whichever bar arrived last.
+        this.barsRevision += 1;
         const cause: ScriptRunCause = reason ? 'history' : this.barCause;
         for (const record of this.registry.all()) {
             if (!record.renderHandle || record.hidden) continue;
@@ -1740,7 +1799,7 @@ export class EngineOrchestrator implements IndicatorController, PaneController, 
     private pokeNative(record: IndicatorRecord): void {
         const native = record.native!;
         if (!native.descriptor.waitsForHistory) {
-            native.instance.onBars();
+            this.runNative(record, () => native.instance.onBars());
             return;
         }
         if (this.historyState === 'backfill') return;
@@ -1750,7 +1809,7 @@ export class EngineOrchestrator implements IndicatorController, PaneController, 
             if (handle) void this.startNativeIndicator(record.id, handle);
             return;
         }
-        if (native.started) native.instance.onBars();
+        if (native.started) this.runNative(record, () => native.instance.onBars());
     }
 
     /** Start the natives still held for a history that has completed without poking them
@@ -1922,7 +1981,7 @@ export class EngineOrchestrator implements IndicatorController, PaneController, 
         if (!record.hidden && !record.native) this.setLoading(record, true);
         record.pendingCause = 'inputs';
         if (record.session) record.session.update(record.inputValues);
-        else if (record.native && !record.hidden) record.native.instance.setInputs(record.inputValues);
+        else if (record.native && !record.hidden) this.runNative(record, () => record.native!.instance.setInputs(record.inputValues));
         this.events.emit('indicator:inputs', { id });
     }
 
@@ -1980,14 +2039,18 @@ export class EngineOrchestrator implements IndicatorController, PaneController, 
     }
 
     private async swapSource(id: string, source: string, handle: IndicatorHandleImpl): Promise<void> {
-        const engine = this.registry.get(id)?.engine ?? this.engineFor(this.registry.get(id)?.options?.language);
+        const owner = this.registry.get(id);
+        if (!owner || this.destroyed) return;
+        const engine = owner.engine ?? this.engineFor(owner.options?.language);
+        const preparation = this.beginPreparation(owner, engine);
         let prepared: PreparedScript;
         try {
-            prepared = await engine.prepare(source, id);
+            prepared = await engine.prepare(source, id, { signal: preparation.controller.signal });
         } catch (err) {
             const record = this.registry.get(id);
             // Only the LATEST pending edit reports; a superseded one failing is noise.
-            if (record?.pendingSource === source) {
+            if (record === owner && this.preparations.get(owner) === preparation && !preparation.controller.signal.aborted && record.pendingSource === source) {
+                this.preparations.delete(owner);
                 record.pendingSource = undefined;
                 this.rejectCode(id, record, handle, err);
             }
@@ -1995,7 +2058,8 @@ export class EngineOrchestrator implements IndicatorController, PaneController, 
         }
         const record = this.registry.get(id);
         // Removed, or superseded by a later updateCode, while preparing.
-        if (!record || record.pendingSource !== source) return;
+        if (record !== owner || this.destroyed || this.preparations.get(owner) !== preparation || preparation.controller.signal.aborted || record.pendingSource !== source) return;
+        this.preparations.delete(owner);
         record.pendingSource = undefined;
         // The restore point is the last code KNOWN to run: an edit landing while another
         // is still on trial keeps that trial's restore point, not the unproven trial.
@@ -2092,13 +2156,100 @@ export class EngineOrchestrator implements IndicatorController, PaneController, 
     }
 
     /** Read-only engine-context snapshot for one indicator (null: no capability / not run). */
-    getIndicatorContext(id: string, select?: ContextSelect): Promise<EngineContextSnapshot | null> {
-        const session = this.registry.get(id)?.session;
-        return session?.getContext?.(select) ?? Promise.resolve(null);
+    async getIndicatorContext(id: string, select?: ContextSelect): Promise<EngineContextSnapshot | null> {
+        const record = this.registry.get(id);
+        const session = record?.session;
+        if (record?.native && !this.destroyed) return this.nativeContext(record, select);
+        if (!record || !session?.getContext || this.destroyed) return null;
+        let snapshot: EngineContextSnapshot | null;
+        try {
+            snapshot = await session.getContext(select);
+        } catch (error) {
+            if (this.destroyed || this.registry.get(id) !== record || record.session !== session) return null;
+            throw error;
+        }
+        if (this.destroyed || this.registry.get(id) !== record || record.session !== session) return null;
+        // Computation acknowledgment is an optional engine capability. Legacy
+        // contexts remain readable, but cannot attest which dispatch produced them.
+        if (!snapshot?.computation) return snapshot ? structuredClone(snapshot) : null;
+        const current = this.computationOf(record);
+        const engineRequested = snapshot.computation.requested;
+        const requested = engineRequested.id === current.id ? { ...current,
+            ...(engineRequested.dataCutoff !== undefined ? { dataCutoff: engineRequested.dataCutoff } : {}) } : current;
+        const completed = snapshot.computation.completed;
+        const pending = this.preparations.has(record) || snapshot.computation.state === 'pending' || this.switchingMarket;
+        const ready = completed?.id === requested.id && snapshot.computation.state === 'ready' && !pending;
+        return { ...snapshot,
+            computation: { state: ready ? 'ready' : pending || !completed ? 'pending' : 'stale', requested,
+                ...(completed ? { completed: structuredClone(completed) } : {}) } };
+    }
+
+    private computationOf(record: IndicatorRecord): EngineComputationIdentity {
+        const prepared = record.prepared;
+        if (prepared && this.computationViewports.get(record)?.prepared !== prepared) this.computationViewports.set(record, { prepared, range: this.currentVisibleRange() });
+        // Runtime detection can correct the prepare-time viewport guess. Keep the
+        // dispatched range in the identity even when that guess changes to false.
+        const range = prepared ? prepared.reactsToViewport ? this.currentVisibleRange() : this.computationViewports.get(record)?.range
+            : record.native?.descriptor.reactsToViewport ? this.currentVisibleRange() : undefined;
+        const value = { source: record.source, inputs: { ...record.inputValues }, props: { ...record.propValues },
+            market: structuredClone(this.market()), bars: { revision: this.barsRevision, count: this.bars.length,
+                firstTime: this.bars[0]?.time ?? null, lastTime: this.bars[this.bars.length - 1]?.time ?? null },
+            ...(range ? { visibleRange: { ...range } } : {}) };
+        const key = JSON.stringify(value);
+        const previous = this.computations.get(record);
+        if (previous?.key === key) return structuredClone(previous.identity);
+        const identity = { id: `${record.id}:${++this.computationSerial}`, ...value };
+        this.computations.set(record, { key, identity });
+        return structuredClone(identity);
+    }
+
+    private runNative(record: IndicatorRecord, run: () => void): void {
+        this.nativeComputations.set(record, this.computationOf(record));
+        try { run(); }
+        finally { this.nativeComputations.delete(record); }
+    }
+
+    private nativeContext(record: IndicatorRecord, select?: ContextSelect): EngineContextSnapshot {
+        const requested = this.computationOf(record);
+        const output = this.nativeContexts.get(record);
+        const completed = output?.completed;
+        const ready = !!completed && completed.id === requested.id && !record.hidden && !this.switchingMarket && !record.loading;
+        const hasSeries = !!output && Object.keys(output.plots).length > 0;
+        const warnings: EngineContextSnapshot['warnings'] = [];
+        if (output?.renderer) warnings.push({ method: 'native.context', bar: -1, message: 'This indicator uses a renderer-layer payload. Its geometry is not available as numeric plot series.' });
+        if (output?.unsupportedSeries) warnings.push({ method: 'native.context', bar: -1, message: 'Nonnumeric native series are omitted from this context.' });
+        if (output && !completed) warnings.push({ method: 'native.context', bar: -1, message: 'This asynchronous native output has no computation identity and cannot be confirmed as current.' });
+        return {
+            language: 'native', phase: 'idle', barIndex: completed ? completed.bars.count - 1 : -1,
+            native: { type: record.native!.type, outputKind: output?.renderer ? hasSeries ? 'mixed' : 'renderer' : hasSeries ? 'series' : 'empty',
+                unsupportedSeries: output?.unsupportedSeries ?? 0, hidden: record.hidden ?? false },
+            meta: { title: record.title, overlay: record.native!.descriptor.overlay },
+            plots: !select || select.includes('plots') ? structuredClone(output?.plots ?? {}) : {},
+            variables: {}, warnings: !select || select.includes('warnings') ? warnings : [],
+            computation: { state: ready ? 'ready' : output ? 'stale' : 'pending', requested,
+                ...(completed ? { completed: structuredClone(completed) } : {}) },
+        };
+    }
+
+    private cancelPreparation(record: IndicatorRecord): void {
+        const pending = this.preparations.get(record);
+        this.preparations.delete(record);
+        pending?.controller.abort();
+    }
+
+    private beginPreparation(record: IndicatorRecord, engine: ScriptingEngine): { controller: AbortController; engine: ScriptingEngine } {
+        this.cancelPreparation(record);
+        const pending = { controller: new AbortController(), engine };
+        this.preparations.set(record, pending);
+        return pending;
     }
 
     removeIndicator(id: string): void {
         const record = this.registry.remove(id);
+        if (record) {
+            this.cancelPreparation(record);
+            this.executions.delete(record);
+        }
         // Removing the auto-added volume is a USER decision — make it stick: the
         // auto-add fires on every load (first paint of every market), so without the
         // opt-out a removed volume resurrected on the next symbol/timeframe switch.
@@ -2166,7 +2317,10 @@ export class EngineOrchestrator implements IndicatorController, PaneController, 
                     const handle = this.handles.get(id);
                     if (handle) void this.startNativeIndicator(id, handle);
                 } else {
-                    record.native.instance.resume();
+                    this.runNative(record, () => {
+                        record.native!.instance.setInputs(record.inputValues);
+                        record.native!.instance.resume();
+                    });
                 }
             } else {
                 this.setLoading(record, true); // spinner on the kept legend row while re-executing
@@ -2241,6 +2395,7 @@ export class EngineOrchestrator implements IndicatorController, PaneController, 
     }
 
     destroy(): void {
+        this.destroyed = true;
         this.bumpGeneration(); // abandon backfill loops/loads mid-flight + release superseded setMarket awaiters
         this.resolveHistoryComplete(); // never leave historyComplete() awaiters hanging
         this.clearReplayTimer();
@@ -2258,6 +2413,8 @@ export class EngineOrchestrator implements IndicatorController, PaneController, 
         this.priceStyleWillChangeUnsub = null;
         // native instances free their own caches/timers in stop()
         for (const record of this.registry.all()) {
+            this.cancelPreparation(record);
+            this.executions.delete(record);
             this.settleCode(record, { ok: false, error: new Error('[vela] updateCode — the chart was destroyed.') });
             record.session?.stop();
             if (record.native) this.stopNativeInstance(record.native);
@@ -2296,9 +2453,12 @@ export class EngineOrchestrator implements IndicatorController, PaneController, 
     }
 
     private async startIndicator(id: string, source: string, options: AddIndicatorOptions, handle: IndicatorHandleImpl): Promise<void> {
+        const owner = this.registry.get(id);
+        if (!owner || this.destroyed) return;
+        let preparation: { controller: AbortController; engine: ScriptingEngine } | undefined;
         try {
             await this.readyPromise;
-            if (!this.registry.get(id)) return;
+            if (this.destroyed || this.registry.get(id) !== owner) return;
 
             // Let the renderer paint the post-fetch frame (e.g. the "Running…" status)
             // before the engine's synchronous transpile + execution monopolizes the
@@ -2306,15 +2466,16 @@ export class EngineOrchestrator implements IndicatorController, PaneController, 
             // for the whole run.
             await yieldToPaint();
             const record = this.registry.get(id);
-            if (!record) return; // removed during the yield
+            if (this.destroyed || record !== owner || record.source !== source || record.pendingSource !== undefined) return;
 
             const engine = this.engineFor(options.language);
             record.engine = engine;
 
-            const prepared = await engine.prepare(source, id);
+            preparation = this.beginPreparation(record, engine);
+            const prepared = await engine.prepare(source, id, { signal: preparation.controller.signal });
             // An updateCode that landed during this prepare owns the record now — the
             // original source must not overwrite the replacement's schema and session.
-            if (record.source !== source) return;
+            if (this.destroyed || this.registry.get(id) !== record || this.preparations.get(record) !== preparation || preparation.controller.signal.aborted || record.source !== source) return;
             record.prepared = prepared;
             const defaults: Record<string, InputValue> = {};
             for (const input of prepared.inputs) defaults[input.key] = input.defval;
@@ -2330,8 +2491,15 @@ export class EngineOrchestrator implements IndicatorController, PaneController, 
             // UI staying blank until the first computed model lands.
             this.mountLoadingPlaceholder(id, record);
             this.executeIndicator(id, handle);
+            // Keep ownership through the synchronous handoff so an execute throw is
+            // reported, but never clear a replacement started by an engine callback.
+            if (this.preparations.get(record) === preparation) this.preparations.delete(record);
         } catch (err) {
-            this.fail(id, handle, err);
+            if (!this.destroyed && this.registry.get(id) === owner && owner.source === source && owner.pendingSource === undefined
+                && (!preparation || this.preparations.get(owner) === preparation && !preparation.controller.signal.aborted)) {
+                this.preparations.delete(owner);
+                this.fail(id, handle, err);
+            }
         }
     }
 
@@ -2342,14 +2510,19 @@ export class EngineOrchestrator implements IndicatorController, PaneController, 
      */
     private executeIndicator(id: string, handle: IndicatorHandleImpl): void {
         const record = this.registry.get(id);
-        if (!record || !record.engine || !record.prepared || record.hidden) return;
+        if (this.destroyed || !record || !record.engine || !record.prepared || record.hidden) return;
         // Stream only when the chart is live, the script is NOT viewport-dependent, and the
         // engine can stream. Viewport scripts + non-streaming engines take the static path.
         const mode: 'static' | 'live' = this.config.live && !record.prepared.reactsToViewport && record.engine.capabilities.streaming ? 'live' : 'static';
         const prepared = record.prepared;
+        this.computationViewports.set(record, { prepared, range: this.currentVisibleRange() });
+        const execution = {};
+        this.executions.set(record, execution);
+        const active = (): boolean => !this.destroyed && this.registry.get(id) === record && this.executions.get(record) === execution && !record.hidden;
         const session = record.engine.execute(
             {
                 prepared: record.prepared,
+                getComputation: () => this.computationOf(record),
                 market: this.market(),
                 bars: this.bars,
                 getBars: () => this.bars,
@@ -2364,6 +2537,7 @@ export class EngineOrchestrator implements IndicatorController, PaneController, 
             },
             {
                 onModel: (model) => {
+                    if (!active()) return;
                     // Read BEFORE applyModel: it is what announces the indicator, and the
                     // consumed cause must not leak into the next model.
                     const first = !record.announced;
@@ -2380,6 +2554,7 @@ export class EngineOrchestrator implements IndicatorController, PaneController, 
                     this.emitScriptRun(id, cause, first);
                 },
                 onAlert: (a) => {
+                    if (!active()) return;
                     // A replayed bar runs the live path, so a script alerts on it as on a live
                     // bar — but it is history: announcing it would pass the past off as a
                     // live signal (toasts, bell, host notifications).
@@ -2392,8 +2567,20 @@ export class EngineOrchestrator implements IndicatorController, PaneController, 
                     this.events.emit('alert', { ...a, indicator });
                     handle.emit('alert', { id: a.id, message: a.message, title: a.title, time: a.time });
                 },
-                onWarning: (w) => this.events.emit('warning', w),
+                onDone: () => {
+                    if (!active()) return;
+                    const range = this.currentVisibleRange();
+                    if (prepared.reactsToViewport && range && record.session
+                        && JSON.stringify(range) !== JSON.stringify(this.computationViewports.get(record)?.range)) {
+                        this.computationViewports.set(record, { prepared, range: { ...range } });
+                        record.pendingCause = 'viewport';
+                        record.session.setVisibleRange(range);
+                    }
+                    this.emitContextChanged(id);
+                },
+                onWarning: (w) => { if (active()) this.events.emit('warning', w); },
                 onError: (err) => {
+                    if (!active()) return;
                     // A failure while the code is on trial (before its first model) rolls
                     // the update back; any later failure is the code's own.
                     if (record.codeTrial) this.rejectCode(id, record, handle, err);
@@ -2403,7 +2590,7 @@ export class EngineOrchestrator implements IndicatorController, PaneController, 
         );
         // A trial that failed synchronously inside `execute` has already been rolled back,
         // and the restored session is in place — the failed one must not overwrite it.
-        if (record.prepared !== prepared) {
+        if (!active() || record.prepared !== prepared) {
             session.stop();
             return;
         }
@@ -2449,16 +2636,29 @@ export class EngineOrchestrator implements IndicatorController, PaneController, 
                 bars: () => this.bars,
                 data: this.dataControl,
                 emit: (out) => {
-                    if (alive) this.applyModel(id, this.buildNativeModel(record, out, this.bars[0]?.time));
+                    if (!alive) return;
+                    const series = out.series ?? [];
+                    const plots: EngineContextSnapshot['plots'] = {};
+                    for (const spec of series) if (isLineLikeSeries(spec)) plots[spec.id] = spec.points.map((point) => ({ time: point.time,
+                        value: typeof point.value === 'number' && Number.isFinite(point.value) ? point.value : null }));
+                    this.nativeContexts.set(record, { plots, completed: this.nativeComputations.get(record),
+                        unsupportedSeries: series.filter((spec) => !isLineLikeSeries(spec)).length,
+                        renderer: this.nativeContexts.get(record)?.renderer ?? false });
+                    this.applyModel(id, this.buildNativeModel(record, out, this.bars[0]?.time));
+                    this.emitContextChanged(id);
                 },
                 pushData: (data) => {
-                    if (alive) this.renderer.setNativeData?.(channel, data);
+                    if (!alive) return;
+                    const previous = this.nativeContexts.get(record);
+                    this.nativeContexts.set(record, { plots: previous?.plots ?? {}, completed: previous?.completed,
+                        unsupportedSeries: previous?.unsupportedSeries ?? 0, renderer: true });
+                    this.renderer.setNativeData?.(channel, data);
                 },
                 setStatus: (status) => {
                     if (alive && record.renderHandle && !record.hidden) this.renderer.setIndicatorStatus?.(record.renderHandle, status);
                 },
             };
-            native.instance.start(ctx, record.inputValues);
+            this.runNative(record, () => native.instance.start(ctx, record.inputValues));
             native.started = true;
         } catch (err) {
             this.fail(id, handle, err);
@@ -3008,7 +3208,8 @@ export class EngineOrchestrator implements IndicatorController, PaneController, 
      *  consumers only need a coarse re-pull signal. Fires only for context-capable sessions. */
     private readonly contextEmitAt = new Map<string, number>();
     private emitContextChanged(id: string): void {
-        if (!this.registry.get(id)?.session?.getContext) return;
+        const record = this.registry.get(id);
+        if (!record?.session?.getContext && !record?.native) return;
         const now = Date.now();
         if (now - (this.contextEmitAt.get(id) ?? 0) < 1000) return;
         this.contextEmitAt.set(id, now);
@@ -3094,12 +3295,6 @@ export class EngineOrchestrator implements IndicatorController, PaneController, 
     }
 }
 
-/**
- * Yield long enough for the renderer to paint one frame before the engine's
- * synchronous transpile + execution locks the main thread. Double-rAF guarantees a
- * paint in the browser (the first callback runs pre-paint, the second resumes the
- * frame after); falls back to a macrotask where rAF is unavailable (tests/headless).
- */
 function now(): number {
     return typeof performance !== 'undefined' ? performance.now() : Date.now();
 }
@@ -3113,9 +3308,24 @@ function usableTicks(value: unknown): readonly ReplayTick[] {
     );
 }
 
+/** Prefer a painted frame before compilation, but embedded or minimized browsers
+ * can suspend animation frames indefinitely. Headless callers yield one macrotask. */
 function yieldToPaint(): Promise<void> {
     if (typeof requestAnimationFrame === 'function') {
-        return new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+        return new Promise((resolve) => {
+            let settled = false;
+            let frame: number | undefined;
+            const finish = (): void => {
+                if (settled) return;
+                settled = true; clearTimeout(timer);
+                if (frame !== undefined && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(frame);
+                resolve();
+            };
+            const timer = setTimeout(finish, 100);
+            frame = requestAnimationFrame(() => {
+                if (!settled) frame = requestAnimationFrame(finish);
+            });
+        });
     }
     return new Promise((resolve) => setTimeout(resolve, 0));
 }

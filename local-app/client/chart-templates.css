@@ -1,0 +1,27 @@
+.local-chart-templates { display:flex; flex-direction:column; gap:14px; padding:14px; color:var(--vela-fg); font:12px var(--vela-font); }
+.local-chart-templates h2 { margin:0 0 12px; font-size:16px; font-weight:500; }
+.local-chart-templates :is(input,select,button) { box-sizing:border-box; min-height:32px; border:1px solid var(--vela-border); border-radius:4px; background:var(--vela-surface); color:var(--vela-fg); font:inherit; }
+.local-chart-templates :is(input,select) { width:100%; padding:6px 8px; }
+.local-chart-templates button { padding:6px 9px; cursor:pointer; }
+.local-chart-templates button:hover:enabled { background:var(--vela-hover); }
+.local-chart-templates button:disabled { opacity:.4; cursor:default; }
+.local-chart-templates :is(input,select,button):focus-visible { outline:2px solid var(--vela-focus); outline-offset:1px; }
+.local-chart-templates label { display:flex; flex-direction:column; gap:5px; color:var(--vela-fg-muted); font-size:11px; }
+.template-capture,.template-filters { display:flex; flex-direction:column; gap:10px; }
+.template-capture > button { background:var(--vela-accent); border-color:var(--vela-accent); color:#fff; }
+.template-filters > label { flex-direction:row; align-items:center; gap:6px; }
+.template-filters input[type='checkbox'] { width:14px; height:14px; min-height:14px; }
+.template-io,.template-card-actions { display:flex; flex-wrap:wrap; gap:6px; }
+.template-message { margin:0; color:var(--vela-accent); overflow-wrap:anywhere; line-height:1.5; }
+.template-message:empty { display:none; }
+.template-message[data-error='true'] { color:#f23645; }
+.template-list { display:flex; flex-direction:column; gap:10px; }
+.template-card { border:1px solid var(--vela-border); border-radius:4px; padding:12px; }
+.template-card header { display:flex; flex-direction:column; gap:5px; margin-bottom:6px; overflow-wrap:anywhere; }
+.template-card strong { font-size:13px; font-weight:500; }
+.template-card :is(header > span,small) { color:var(--vela-fg-muted); font-size:10px; }
+.template-card-actions,.template-rename { margin-top:12px; }
+.template-rename { display:flex; flex-wrap:wrap; gap:7px; }
+.template-rename label { flex-basis:100%; }
+.template-empty,.template-note { color:var(--vela-fg-muted); line-height:1.7; font-size:11px; margin:0; }
+.local-chart-templates [hidden] { display:none !important; }

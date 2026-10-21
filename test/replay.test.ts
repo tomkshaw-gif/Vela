@@ -165,6 +165,32 @@ afterEach(() => {
 });
 
 describe('chart.replay', () => {
+    it('exposes only the newest loaded or revealed source bar and copies snapshots', async () => {
+        const { chart, renderer, feed } = make();
+        expect(chart.latestBar).toBeNull();
+        const replacements: Array<OHLCV | null> = [];
+        chart.on('data:changed', ({ lastBar }) => replacements.push(lastBar));
+        await chart.ready();
+        const full = [...renderer.bars];
+        expect(chart.latestBar).toEqual(full[full.length - 1]);
+        chart.latestBar!.close = -500;
+        expect(chart.latestBar!.close).toBe(199);
+        await chart.replay.start({ from: full[19]!.time });
+        expect(chart.latestBar).toEqual(full[19]);
+        expect(replacements[replacements.length - 1]).toEqual(full[19]);
+        chart.replay.step();
+        expect(chart.latestBar).toEqual(full[20]);
+        chart.replay.stop();
+        expect(chart.latestBar).toEqual(full[full.length - 1]);
+        await flush();
+        const live = { ...full[full.length - 1]!, close: 201 };
+        feed.onBar?.(live);
+        expect(chart.latestBar).toEqual(live);
+        await chart.setMarket({ data: full.slice(0, 3) });
+        expect(replacements).toContain(null);
+        expect(chart.latestBar).toEqual(full[2]);
+    });
+
     it('start() cuts the history at `from`, pauses live updates, and reports the queue', async () => {
         const { chart, feed, renderer } = make();
         await chart.ready();
@@ -453,6 +479,8 @@ describe('chart.replay', () => {
         chart.on('replay:start', () => events.push('start'));
         chart.on('market:changed', () => events.push('market'));
         const subs = feed.subs;
+        const readouts: OHLCV[] = [];
+        chart.on('data:changed', ({ lastBar }) => { if (lastBar) readouts.push(lastBar); });
 
         await chart.setMarket({ timeframe: '30' }); // finer: every 30m bar of the revealed hour stays
         await flush();
@@ -460,7 +488,25 @@ describe('chart.replay', () => {
         expect(events).toEqual(['start', 'market']);
         expect(chart.replay.state).toMatchObject({ active: true, playing: true, cursorTime: cursor });
         expect(feed.subs).toBe(subs); // no live subscription while replaying
+        expect(readouts.length).toBeGreaterThan(0);
+        expect(readouts.every((bar) => bar.time <= cursor)).toBe(true);
         chart.replay.stop();
+    });
+
+    it('does not expose queued future bars while an older replay seek borrows full history', async () => {
+        const { chart, renderer } = make({ bars: 100, total: 300 });
+        await chart.ready();
+        const oldCursor = renderer.bars[49]!.time;
+        await chart.replay.start({ from: oldCursor });
+        const snapshots: OHLCV[] = [];
+        chart.on('data:changed', ({ lastBar }) => {
+            if (lastBar) snapshots.push(lastBar);
+            if (chart.latestBar) expect(chart.latestBar.time).toBeLessThanOrEqual(oldCursor);
+        });
+        await chart.replay.start({ from: T0 + 150 * HOUR });
+        expect(snapshots.length).toBeGreaterThan(1);
+        expect(snapshots.every((bar) => bar.time <= oldCursor)).toBe(true);
+        expect(chart.latestBar!.time).toBe(T0 + 150 * HOUR);
     });
 
     it('the replay reads active all through a timeframe switch — no off/on while the new bars load', async () => {

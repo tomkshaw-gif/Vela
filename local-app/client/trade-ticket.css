@@ -1,0 +1,65 @@
+.local-order-ticket.local-order-ticket{padding:0!important;font-family:-apple-system,BlinkMacSystemFont,"Trebuchet MS",Roboto,Ubuntu,sans-serif;font-size:14px;font-feature-settings:"tnum" on,"lnum" on;color:var(--vela-fg,#dbdbdb)}
+.local-order-ticket [hidden]{display:none!important}
+.local-order-ticket #ticket-form{display:flex;flex-direction:column;text-align:left}
+.local-order-ticket button,.local-order-ticket input{font-family:inherit}
+.local-order-ticket.local-order-ticket label{font-size:14px;font-weight:400;line-height:18px}
+.local-order-ticket button:disabled{opacity:1}
+.local-order-ticket .ticket-side-control{display:flex;gap:1px;padding:8px 16px 0}
+.local-order-ticket .ticket-side-control button{flex:1;display:flex;flex-direction:column;min-height:52px;padding:5px 10px;border:0;background:var(--color-container-fill-primary-neutral-extra-light,#2e2e2e);color:var(--vela-fg,#dbdbdb);text-align:left;border-radius:8px 0 0 8px;cursor:pointer}
+.local-order-ticket .ticket-side-control button[data-ticket-side=buy]{text-align:right;align-items:flex-end;border-radius:0 8px 8px 0}
+.local-order-ticket .ticket-side-control button>span{flex:1;font-size:14px;font-weight:600;line-height:18px;letter-spacing:-.011em}
+.local-order-ticket .ticket-side-control button>small{flex:1;font-size:16px;font-weight:400;line-height:24px;letter-spacing:-.0198em;color:var(--color-default-gray,#787b86)}
+.local-order-ticket .ticket-side-control button[aria-pressed=true]>small{color:#fff}
+.local-order-ticket .ticket-side-control button[data-ticket-side=sell][aria-pressed=true]{background:var(--color-container-fill-primary-danger-light,#4d191d);color:var(--color-content-primary-danger-semi-bold,#f23645)}
+.local-order-ticket .ticket-side-control button[data-ticket-side=buy][aria-pressed=true]{background:var(--color-container-fill-primary-accent-light,#142e61);color:var(--vela-accent,#2962ff)}
+.local-order-ticket .ticket-type-tabs{position:relative;display:flex;margin:16px 16px 0;padding-bottom:4px}
+.local-order-ticket .ticket-type-tabs::before{content:"";position:absolute;inset:auto 0 0;height:4px;border-radius:2px;background:var(--color-cold-gray-700,#4a4a4a)}
+.local-order-ticket .ticket-type-tabs button{position:relative;flex:1;border:0;border-radius:4px;background:transparent;color:var(--vela-fg,#dbdbdb);font-size:14px;font-weight:400;line-height:18px;padding:0 3px 10px;cursor:pointer}
+.local-order-ticket .ticket-type-tabs button[aria-selected=true]::after{content:"";position:absolute;inset:auto 0 -4px;height:4px;border-radius:2px;background:var(--color-container-fill-primary-neutral-extra-bold,#f2f2f2)}
+.local-order-ticket #ticket-fields{padding:12px 16px}
+.local-order-ticket .ticket-price-field,.local-order-ticket label.ticket-quantity-field{display:flex;flex-direction:column;gap:4px;font-size:14px;line-height:18px;color:var(--vela-fg-muted,#8c8c8c);margin:0}
+.local-order-ticket .ticket-entry-price{margin:0 0 12px!important}
+.local-order-ticket label.ticket-quantity-field{padding-bottom:4px}
+.local-order-ticket .ticket-input-row{display:flex;align-items:center;min-width:0;height:34px;border:1px solid var(--color-control-intent-default,#575757);border-radius:8px;background:transparent;overflow:hidden;box-sizing:border-box}
+.local-order-ticket .ticket-input-row:focus-within{border-color:var(--vela-accent,#2962ff);box-shadow:0 0 0 1px var(--vela-accent,#2962ff)}
+.local-order-ticket .ticket-input-row input{width:100%;min-width:0;height:100%;min-height:0;border:0!important;background:transparent!important;border-radius:0;box-shadow:none!important;outline:none;padding:0 7px;font-size:14px;line-height:18px;color:var(--vela-fg,#dbdbdb);font-variant-numeric:tabular-nums;appearance:textfield}
+.local-order-ticket .ticket-input-row input::placeholder{color:var(--vela-fg-muted,#8c8c8c);opacity:1}
+.local-order-ticket .ticket-input-row input::-webkit-inner-spin-button,.local-order-ticket .ticket-input-row input::-webkit-outer-spin-button{appearance:none;margin:0}
+.local-order-ticket .ticket-steppers{display:flex;flex:none;align-items:center;padding-right:4px;gap:0}
+.local-order-ticket .ticket-steppers button{border:0;border-radius:4px;background:transparent;color:var(--vela-fg-muted,#8c8c8c);padding:0;width:22px;height:26px;font-size:16px;line-height:18px;cursor:pointer}
+.local-order-ticket .ticket-steppers button:hover:not(:disabled){background:var(--vela-hover,#2e2e2e);color:var(--vela-fg,#dbdbdb)}
+.local-order-ticket [data-ticket-pick]{flex:none;background:transparent;border:0;border-radius:4px;color:var(--vela-fg-muted,#8c8c8c);font-size:20px;line-height:24px;width:28px;height:28px;padding:0;cursor:crosshair}
+.local-order-ticket [data-ticket-pick][aria-pressed=true]{color:var(--vela-accent,#2962ff);background:var(--vela-active,#2962ff1f)}
+.local-order-ticket .ticket-metadata{display:flex;justify-content:space-between;align-items:baseline;padding-top:8px;color:var(--vela-fg-muted,#8c8c8c);font-size:13px;line-height:18px}
+.local-order-ticket .ticket-tick-value{display:flex;align-items:baseline;gap:3px;color:var(--vela-fg,#dbdbdb)}
+.local-order-ticket .ticket-tick-value strong{font-size:13px;line-height:18px;font-weight:600}
+.local-order-ticket .ticket-tick-value small{font-size:10px;line-height:16px;font-weight:400}
+.local-order-ticket .ticket-exits{padding:12px 0}
+.local-order-ticket button.ticket-exits-heading{display:flex;align-items:center;justify-content:space-between;width:100%;height:30px;padding:8px 6px 0 0;margin:0 0 12px;border:0;border-radius:0;background:transparent;color:var(--vela-fg,#dbdbdb);font-size:14px;font-weight:600;line-height:18px;cursor:pointer}
+.local-order-ticket .ticket-exits-heading svg{width:18px;height:18px;fill:none;stroke:var(--vela-fg-muted,#8c8c8c);stroke-width:1.5}
+.local-order-ticket .ticket-exits-heading[aria-expanded=false]{margin-bottom:0}
+.local-order-ticket .ticket-exits-heading[aria-expanded=false] svg{transform:rotate(180deg)}
+.local-order-ticket #ticket-exit-fields{display:flex;flex-direction:column;gap:16px}
+.local-order-ticket .ticket-exit-heading{display:flex;align-items:center;justify-content:space-between;min-height:20px;margin-bottom:8px;color:var(--vela-fg-muted,#8c8c8c);font-size:14px;font-weight:400;line-height:18px}
+.local-order-ticket .ticket-exit-heading>label:first-child{cursor:text}
+.local-order-ticket label.ticket-exit-toggle{position:relative;display:block;flex:none;width:38px;height:20px;margin:0;cursor:pointer}
+.local-order-ticket .ticket-exit-toggle input{position:absolute;inset:0;z-index:1;width:100%;height:100%;min-height:0;margin:0;opacity:0;cursor:pointer}
+.local-order-ticket .ticket-switch-track{display:block;width:38px;height:20px;border-radius:20px;background:var(--color-container-fill-primary-neutral,#636363)}
+.local-order-ticket .ticket-switch-track>span{display:block;width:14px;height:14px;border-radius:50%;background:var(--color-container-fill-quinary-inverse,#2e2e2e);transform:translate(3px,3px);transition:transform .25s ease-out}
+.local-order-ticket .ticket-exit-toggle input:checked+.ticket-switch-track{background:var(--color-container-fill-primary-neutral-extra-bold,#f2f2f2)}
+.local-order-ticket .ticket-exit-toggle input:checked+.ticket-switch-track>span{transform:translate(21px,3px)}
+.local-order-ticket .ticket-exit-toggle input:focus-visible+.ticket-switch-track{outline:2px solid var(--vela-accent,#2962ff);outline-offset:4px}
+.local-order-ticket .ticket-price-equivalent{flex:none;font-size:13px;line-height:18px;white-space:nowrap;color:var(--vela-fg-muted,#8c8c8c);padding:0 4px}
+.local-order-ticket .ticket-exit-field[data-enabled=false] .ticket-input-row{background:var(--color-container-fill-primary-neutral-thin,#1f1f1f)}
+.local-order-ticket .ticket-exit-field[data-enabled=false] .ticket-input-row :is(input,button,.ticket-price-equivalent){color:var(--color-content-primary-neutral-light,#575757);cursor:default}
+.local-order-ticket .ticket-exit-field[data-enabled=false] .ticket-input-row input::placeholder{color:var(--color-content-primary-neutral-light,#575757)}
+.local-order-ticket .ticket-error{font-size:12px;line-height:18px;color:var(--color-content-primary-danger-semi-bold,#f23645);margin:12px 0 0}
+.local-order-ticket .ticket-done{padding:12px 16px 16px}
+.local-order-ticket button.ticket-place{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:0;min-height:56px;width:100%;border:1px solid transparent;border-radius:12px;background:var(--vela-accent,#2962ff);color:#fff;padding:6px 23px;cursor:pointer}
+.local-order-ticket button.ticket-place[data-side=sell]{background:var(--color-container-fill-primary-danger,#f23645)}
+.local-order-ticket .ticket-place strong{font-size:16px;font-weight:600;line-height:24px}
+.local-order-ticket .ticket-place small{font-size:13px;font-weight:400;line-height:18px}
+.local-order-ticket .ticket-place:disabled{background:var(--color-container-fill-primary-neutral-light,#4a4a4a);color:var(--color-content-primary-neutral-light,#575757);cursor:default}
+.local-order-ticket .ticket-hint{font-size:10px;line-height:16px;color:var(--vela-fg-muted,#8c8c8c);text-align:center;margin:8px 0 0}
+.local-order-ticket button:focus-visible{outline:2px solid var(--vela-accent,#2962ff);outline-offset:2px}
+@media(max-width:479px){.local-order-ticket .ticket-side-control{padding:15px 20px 0}.local-order-ticket .ticket-type-tabs{margin:16px 20px 0}.local-order-ticket #ticket-fields{padding:12px 20px}.local-order-ticket .ticket-done{padding:16px 20px}}

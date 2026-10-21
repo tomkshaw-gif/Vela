@@ -3,6 +3,7 @@
 // (`registerLayout`) plugins extend like every other Vela registry.
 export { VelaWorkspace } from './VelaWorkspace';
 export type { VelaWorkspaceOptions, WorkspaceEventMap, WorkspaceScriptRun } from './VelaWorkspace';
+export type { DrawingToolbarUtility } from '../renderers/native/drawings/DrawingToolbar';
 export { ChartCell } from './ChartCell';
 export type { CellSeed, CellBoot, CellChartDefaults, PooledCellState, CellNativeInfo } from './ChartCell';
 export type { WorkspaceWidgetContext } from './context';

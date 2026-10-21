@@ -18,6 +18,7 @@ import type {
     DataWindowReadout,
 } from '../../core/ports/IChartRenderer';
 import type { VelaTheme } from '../../core/options';
+import { backgroundCornerColor, backgroundCss, backgroundPaint, type BackgroundGradient } from './core/background';
 import type { OHLCV } from '../../core/model/ohlcv';
 import type { Millis } from '../../core/model/time';
 import type { VolumeLayerData, VpvrLayerData } from '../../core/model/volume-layers';
@@ -288,7 +289,10 @@ export class NativeRenderer implements IChartRenderer {
     private zoomAnchorLogical = 0; // logical kept pinned under the cursor while zooming
     private zoomAnchorX = 0; // pixel the anchor logical is pinned to
     private zoomAnchorMode: 'cursor' | 'right' = 'right'; // wheel-zoom anchor (right edge by default, the common idiom)
+    private gestureProfile: 'standard' | 'terminal' = 'standard';
+    private reservedTimeAxisHeight = TIME_AXIS_H;
     private panVelocity = 0; // inertial rightOffset velocity (logical units / ms)
+    private terminalPanRemainingMs: number | null = null;
 
     private bars: OHLCV[] = [];
     private didInitialFit = false;
@@ -318,6 +322,8 @@ export class NativeRenderer implements IChartRenderer {
     private scaleDragHolder: ScaleHolder | null = null; // pane master OR merged-indicator scale being dragged
     private scaleDragHeight = 0; // the grabbed pane's pixel height (for vertical-pan math)
     private scaleDragStart: PriceScale | null = null; // its price window when the gesture began
+    private scaleDragStartY = 0;
+    private pricePinch: { holder: ScaleHolder; scale: PriceScale; bounds: PaneBounds; anchors: [number, number] } | null = null;
 
     // ── pane resize (drag the separator between stacked panes) ──
     private paneResizeEnabled = true;
@@ -407,7 +413,7 @@ export class NativeRenderer implements IChartRenderer {
     }
 
     readonly name = 'native';
-    readonly features: readonly string[] = ['logScale', 'currentPriceLine', 'priceLabel', 'countdown', 'upColor', 'downColor', 'glow', 'animZoom', 'animPan', 'animScroll', 'animAutoscale', 'animLiveBar', 'intro', 'zoomAnchor', 'axisDrag', 'paneResize', 'candleZOrder', 'candleVisible', 'seriesOrder', 'highlights', 'sessionZones', 'gridlines', 'axisLabels', 'scaleMode', 'invertScale', 'paneScales', 'autoScale', 'timezone', 'keyboard', 'historyChords', 'priceStyle', 'priceBaseline', 'baselinePrice', 'settings', 'attribution', 'dialogHost', 'tradeMarkers', 'marks', 'indicatorTitles', 'indicatorValues', 'crosshairOverride', 'drawingsInteractive', 'priceAxisTicks'];
+    readonly features: readonly string[] = ['logScale', 'currentPriceLine', 'priceLabel', 'countdown', 'upColor', 'downColor', 'glow', 'animZoom', 'animPan', 'animScroll', 'animAutoscale', 'animLiveBar', 'intro', 'zoomAnchor', 'gestureProfile', 'candleRasterization', 'axisRendering', 'axisDrag', 'paneResize', 'candleZOrder', 'candleVisible', 'seriesOrder', 'highlights', 'sessionZones', 'gridlines', 'axisLabels', 'scaleMode', 'invertScale', 'paneScales', 'autoScale', 'timezone', 'keyboard', 'historyChords', 'priceStyle', 'priceBaseline', 'baselinePrice', 'settings', 'attribution', 'dialogHost', 'tradeMarkers', 'marks', 'indicatorTitles', 'indicatorValues', 'crosshairOverride', 'drawingsInteractive', 'priceAxisTicks'];
 
     /** Apply a render feature live — mutate the field + invalidate, no engine re-run. */
     applyFeature(key: string, value: unknown): void {
@@ -472,6 +478,20 @@ export class NativeRenderer implements IChartRenderer {
                 this.zoomAnchorMode = value === 'right' ? 'right' : 'cursor';
                 if (this.input) this.input.rightEdgeZoom = this.zoomAnchorMode === 'right';
                 return; // affects the next wheel-zoom only — nothing to repaint
+            case 'gestureProfile':
+                this.gestureProfile = value === 'terminal' ? 'terminal' : 'standard';
+                if (this.input) this.input.gestureProfile = this.gestureProfile;
+                return;
+            case 'candleRasterization':
+                this.scene.candleRasterization = value === 'terminal' ? 'terminal' : 'standard';
+                break;
+            case 'axisRendering': {
+                const mode = value === 'terminal' ? 'terminal' : 'standard';
+                if (this.scene.axisRendering === mode) return;
+                this.scene.axisRendering = mode;
+                this.refreshAxisGeometry();
+                break;
+            }
             case 'axisDrag':
                 this.axisDragEnabled = Boolean(value);
                 if (this.input) this.input.axisDrag = this.axisDragEnabled;
@@ -628,6 +648,9 @@ export class NativeRenderer implements IChartRenderer {
             case 'animLiveBar': return this.animLiveBar.tau;
             case 'intro': return this.intro.style;
             case 'zoomAnchor': return this.zoomAnchorMode;
+            case 'gestureProfile': return this.gestureProfile;
+            case 'candleRasterization': return this.scene.candleRasterization;
+            case 'axisRendering': return this.scene.axisRendering;
             case 'axisDrag': return this.input ? this.input.axisDrag : this.axisDragEnabled;
             case 'paneResize': return this.input ? this.input.paneResize : this.paneResizeEnabled;
             case 'candleZOrder': return this.scene.candleZ;
@@ -764,6 +787,7 @@ export class NativeRenderer implements IChartRenderer {
             chartTypes: chartTypesBag,
             layout: {
                 background: t.background,
+                backgroundGradient: s.backgroundGradient ? { ...s.backgroundGradient } : null,
                 textColor: t.textColor,
                 fontFamily: t.fontFamily,
                 fontSize: s.fontSize,
@@ -812,6 +836,7 @@ export class NativeRenderer implements IChartRenderer {
                 upColor: this.candleUp,
                 downColor: this.candleDown,
                 bodyVisible: s.candle.bodyVisible,
+                hollowUp: s.candle.hollowUp ?? false,
                 borderVisible: s.candle.borderVisible,
                 borderUpColor: s.candle.borderUpColor ?? this.candleUp,
                 borderDownColor: s.candle.borderDownColor ?? this.candleDown,
@@ -868,6 +893,7 @@ export class NativeRenderer implements IChartRenderer {
     applyConfig(config: unknown): void {
         const next = mergeConfig(this.getConfig(), config);
         const s = this.scene.style;
+        const previousAxisFontSize = s.fontSize;
         // Chart-type SDK settings: on change, store + push the type's `<id>-settings`
         // channel (its renderer layer reads it) + notify the core (its data engine).
         for (const [typeId, vals] of Object.entries(next.chartTypes)) {
@@ -900,6 +926,7 @@ export class NativeRenderer implements IChartRenderer {
         }
         this.theme = { ...this.theme, background: next.layout.background, textColor: inks.textColor, gridColor: inks.gridColor, borderColor: inks.borderColor, fontFamily: next.layout.fontFamily };
         s.fontSize = next.layout.fontSize;
+        s.backgroundGradient = next.layout.backgroundGradient ?? null;
         // `mergeConfig` runs over the RESOLVED getConfig(), so a live "inherit the theme"
         // sentinel (null) comes back as its concrete value even when the patch never named
         // the field. Writing that back would pin the old theme's color forever; keep the
@@ -959,6 +986,7 @@ export class NativeRenderer implements IChartRenderer {
         this.candleDown = next.candles.downColor;
         s.candle = {
             bodyVisible: next.candles.bodyVisible,
+            hollowUp: next.candles.hollowUp ?? false,
             borderVisible: next.candles.borderVisible,
             borderUpColor: next.candles.borderUpColor,
             borderDownColor: next.candles.borderDownColor,
@@ -1017,6 +1045,7 @@ export class NativeRenderer implements IChartRenderer {
         // steal focus from the control being dragged/typed. It re-themes on next open.
         this.refreshScrollButtonTheme();
         this.refreshAttributionColor();
+        if (this.scene.axisRendering === 'terminal' && previousAxisFontSize !== s.fontSize) this.refreshAxisGeometry();
         this.scheduler?.invalidate(InvalidateLevel.Full);
         // The settings dialog commits through applyConfig — this is how host chrome
         // that mirrors a config value (bottom-bar timezone) learns about in-chart edits.
@@ -1061,7 +1090,7 @@ export class NativeRenderer implements IChartRenderer {
         btn.innerHTML = iconAt('gear', 14);
         Object.assign(btn.style, {
             position: 'absolute',
-            bottom: `${TIME_AXIS_H + 10}px`,
+            bottom: `${this.timeAxisHeight() + 10}px`,
             right: `${RIGHT_AXIS_W + 10}px`,
             zIndex: '6',
             width: '26px',
@@ -1165,7 +1194,7 @@ export class NativeRenderer implements IChartRenderer {
         btn.innerHTML = this.scrollButtonIcon();
         Object.assign(btn.style, {
             position: 'absolute',
-            bottom: `${SCROLL_BTN_BOTTOM}px`,
+            bottom: `${this.timeAxisHeight() + 14}px`,
             right: `${SCROLL_BTN_RIGHT}px`,
             zIndex: '6',
             width: `${SCROLL_BTN_SIZE}px`,
@@ -1291,7 +1320,7 @@ export class NativeRenderer implements IChartRenderer {
         out.height = this.dataCanvas.height;
         const ctx = out.getContext('2d');
         if (!ctx) return null;
-        ctx.fillStyle = this.theme.background;
+        ctx.fillStyle = backgroundPaint(ctx, this.theme.background, this.scene.style.backgroundGradient, out.height);
         ctx.fillRect(0, 0, out.width, out.height);
         // DOM replicas share the plot's coordinate space (the canvases fill it).
         const plotRect = this.plot?.getBoundingClientRect();
@@ -1412,8 +1441,8 @@ export class NativeRenderer implements IChartRenderer {
     /** The colors the axis-scale gutters (price + time) paint with: the LIVE chart background
      *  (`layout.background`) and its contrast-corrected text, so the scales read as part of the
      *  plot. Only the toolbar/dialog chrome stays on the stable app-theme surface. */
-    private axisSurface(): { background: string; textColor: string } {
-        return { background: this.theme.background, textColor: this.theme.textColor };
+    private axisSurface(): { background: string; textColor: string; backgroundGradient: BackgroundGradient | null } {
+        return { background: this.theme.background, textColor: this.theme.textColor, backgroundGradient: this.scene.style.backgroundGradient };
     }
 
     // ── lifecycle ──
@@ -1520,7 +1549,8 @@ export class NativeRenderer implements IChartRenderer {
             getCoords: () => this.coords,
             apply: (vp) => this.applyViewport(vp),
             zoomTo: (target, anchorLogical, anchorX) => this.zoomTo(target, anchorLogical, anchorX),
-            fling: (v) => this.fling(v),
+            zoomTime: (x, step, forceCursor) => this.zoomTime(x, step, forceCursor),
+            fling: (v, duration) => this.fling(v, duration),
             onPointerMove: (x, y) => this.handlePointerMove(x, y),
             onClick: (x, y) => {
                 if (this.handleMarkClick(x, y)) return; // a lane glyph takes the click whole
@@ -1534,6 +1564,8 @@ export class NativeRenderer implements IChartRenderer {
             priceScaleBy: (dy) => this.priceScaleBy(dy),
             beginPricePan: (y) => this.beginPricePan(y),
             pricePanBy: (dy) => this.pricePanBy(dy),
+            beginPricePinch: (x, y1, y2) => this.beginPricePinch(x, y1, y2),
+            pricePinchTo: (y1, y2) => this.pricePinchTo(y1, y2),
             resetPriceScale: (x, y) => this.resetPriceScale(x, y),
             dataDblClick: (x, y) => this.dataDblClick(x, y),
             paneSeparatorAt: (y) => this.paneSeparatorAt(y),
@@ -1542,6 +1574,7 @@ export class NativeRenderer implements IChartRenderer {
             endPaneResize: () => this.endPaneResize(),
             resetPaneSize: (y) => this.resetPaneSize(y),
             resetView: () => this.resetView(),
+            resetTimeScale: () => this.resetTimeScale(),
             // User drawings claim a gesture before pan when armed / over a drawing.
             drawingsClaim: (x, y) => this.userDrawings?.claim(x, y) ?? false,
             drawingsMeasureStart: (x, y, snap) => this.userDrawings?.beginMeasureAt(x, y, snap) ?? false,
@@ -1557,6 +1590,7 @@ export class NativeRenderer implements IChartRenderer {
             drawingsClearTransient: () => this.userDrawings?.clearTransient(),
         });
         this.input.rightEdgeZoom = this.zoomAnchorMode === 'right'; // honor a pre-mount feature set
+        this.input.gestureProfile = this.gestureProfile;
         this.input.axisDrag = this.axisDragEnabled;
         this.input.paneResize = this.paneResizeEnabled;
         this.input.drawings = this.drawingsInteractive;
@@ -2520,6 +2554,7 @@ export class NativeRenderer implements IChartRenderer {
         this.animator.stop();
         this.panVelocity = 0;
         this.scrollTargetRO = null;
+        this.terminalPanRemainingMs = null;
         const clamped = this.clampViewport(vp.barSpacing, vp.rightOffset);
         this.coords.setViewport(clamped);
         this.targetBarSpacing = clamped.barSpacing;
@@ -2547,11 +2582,26 @@ export class NativeRenderer implements IChartRenderer {
         this.animator.start();
     }
 
+    /** Discrete navigation leaves the user's animation preferences intact for other controls. */
+    private zoomTime(x: number, step: number, forceCursor: boolean): void {
+        const width = this.coords.width;
+        if (width < 3 || this.coords.barCount === 0) return;
+        const cursorX = Math.max(1, Math.min(width - 2, x));
+        const logical = Math.round(Math.round(this.coords.xToLogical(cursorX) * 1e6) / 1e6);
+        const vp = this.coords.getViewport();
+        const barSpacing = this.clampViewport(vp.barSpacing * (1 + step / 10), vp.rightOffset).barSpacing;
+        const rightOffset = forceCursor || this.zoomAnchorMode === 'cursor'
+            ? logical + (width - cursorX) / (barSpacing * this.coords.spacingScale) - (this.coords.barCount - 1)
+            : vp.rightOffset;
+        this.applyViewport({ barSpacing, rightOffset });
+    }
+
     /** Inertial pan: continue with a rightOffset velocity (logical units / ms) that decays. */
-    private fling(velocity: number): void {
+    private fling(velocity: number, durationMs?: number): void {
         if (!this.animPan.on) return; // pan animation off → drag-release stops dead
         this.scrollTargetRO = null; // a fresh flick cancels an in-flight scroll-to-latest glide
         this.panVelocity = velocity;
+        this.terminalPanRemainingMs = durationMs ?? null;
         this.animator.start();
     }
 
@@ -2573,21 +2623,23 @@ export class NativeRenderer implements IChartRenderer {
     private clampViewport(barSpacing: number, rightOffset: number): ViewportState {
         const n = this.coords.barCount;
         const W = this.coords.width;
-        if (n <= 1 || W <= 0) return { barSpacing: clampBarSpacing(barSpacing), rightOffset };
-        const minVisible = Math.min(MIN_VISIBLE_BARS, n);
+        if (n === 0 || (n === 1 && this.gestureProfile === 'standard') || W <= 0) return { barSpacing: clampBarSpacing(barSpacing), rightOffset };
+        const minVisible = this.gestureProfile === 'terminal' ? MIN_VISIBLE_BARS : Math.min(MIN_VISIBLE_BARS, n);
         // Bars-on-screen depends on the EFFECTIVE pitch (barSpacing × spacing multiplier), so fold
         // the multiplier into these bar-count limits — else a >1 multiplier would let the user zoom
         // in past minVisible, or zoom out to a thin strip that no longer fills the width.
         const scale = this.coords.spacingScale;
         // bar spacing: max keeps ≥ minVisible bars on screen; min keeps all bars + a margin within the width.
-        const maxBs = Math.min(MAX_BAR_SPACING, W / (minVisible * scale));
-        const minBs = Math.max(MIN_BAR_SPACING, Math.min(maxBs, W / ((n + ZOOM_OUT_MARGIN_BARS) * scale)));
+        const maxBs = this.gestureProfile === 'terminal' ? W / (minVisible * scale)
+            : Math.min(MAX_BAR_SPACING, W / (minVisible * scale));
+        const minBs = this.gestureProfile === 'terminal' ? MIN_BAR_SPACING
+            : Math.max(MIN_BAR_SPACING, Math.min(maxBs, W / ((n + ZOOM_OUT_MARGIN_BARS) * scale)));
         const bs = Math.max(minBs, Math.min(maxBs, barSpacing));
         // right offset: the ONLY pan limit is keeping ≥ minVisible candles on screen. Panning left
         // can push the data far left (lots of right whitespace) until just minVisible remain; panning
         // right can scroll into the oldest bars until just minVisible remain at the right edge.
         const visBars = W / (bs * scale);
-        const maxRo = visBars - (minVisible - 1); // slide left until exactly minVisible candles remain
+        const maxRo = visBars - (this.gestureProfile === 'terminal' ? minVisible : minVisible - 1);
         const minRo = minVisible - n; // slide right until exactly minVisible candles remain at the right edge
         const ro = Math.max(minRo, Math.min(maxRo, rightOffset));
         return { barSpacing: bs, rightOffset: ro };
@@ -2611,7 +2663,17 @@ export class NativeRenderer implements IChartRenderer {
         }
 
         const stopVel = FLING_STOP_PX / Math.max(1e-6, barSpacing * this.coords.spacingScale); // zoom-invariant stop point
-        if (Math.abs(this.panVelocity) > stopVel) {
+        if (this.terminalPanRemainingMs !== null && this.panVelocity !== 0) {
+            const dt = this.animPan.on ? Math.min(dtMs, this.terminalPanRemainingMs) : 0;
+            const logDecay = Math.log(0.997);
+            rightOffset += this.panVelocity * Math.expm1(logDecay * dt) / logDecay;
+            this.panVelocity *= Math.exp(logDecay * dt);
+            this.terminalPanRemainingMs -= dt;
+            if (!this.animPan.on || this.terminalPanRemainingMs <= 0) {
+                this.panVelocity = 0;
+                this.terminalPanRemainingMs = null;
+            } else active = true;
+        } else if (Math.abs(this.panVelocity) > stopVel) {
             rightOffset += this.panVelocity * dtMs;
             const tau = this.animPan.tau; // 0 (switched off mid-fling) ⇒ the glide ends this frame
             this.panVelocity = tau > 0 ? this.panVelocity * Math.exp(-dtMs / tau) : 0;
@@ -2886,7 +2948,7 @@ export class NativeRenderer implements IChartRenderer {
     // ── manual vertical scaling (price-axis drag + vertical price pan) ──
     /** The scale window a gesture targets: a pane's master scale, or a merged indicator's
      *  own scale column (resolved from the grabbed x). Both share the four scale fields. */
-    private resolveScaleHolder(x: number, y: number): { holder: ScaleHolder; height: number } | null {
+    private resolveScaleHolder(x: number, y: number): { holder: ScaleHolder; height: number; pane: PaneNode } | null {
         const pane = this.paneNodeAtY(y);
         if (!pane) return null;
         const dataW = this.coords.width;
@@ -2894,18 +2956,22 @@ export class NativeRenderer implements IChartRenderer {
         if (x >= dataW + AXIS_MASTER_W && merged.length > 0) {
             const k = Math.floor((x - dataW - AXIS_MASTER_W) / AXIS_MERGED_W);
             const model = merged[k];
-            if (model) return { holder: this.scene.ensureIndicatorScale(model.id, pane.scaleTarget), height: pane.bounds.height };
+            if (model) return { holder: this.scene.ensureIndicatorScale(model.id, pane.scaleTarget), height: pane.bounds.height, pane };
         }
-        return { holder: pane, height: pane.bounds.height };
+        return { holder: pane, height: pane.bounds.height, pane };
     }
 
     /** Grab the price axis: snapshot the grabbed scale's window and freeze it into manual mode. */
     private beginPriceScale(x: number, y: number): void {
         const res = this.resolveScaleHolder(x, y);
-        if (!res) return;
+        this.scaleDragHolder = null;
+        this.scaleDragStart = null;
+        if (!res || (this.gestureProfile === 'terminal' && paneScaleMode(this.scene, res.pane) !== 'price')) return;
         this.scaleDragHolder = res.holder;
         this.scaleDragHeight = res.height;
+        this.scaleDragStartY = y - res.pane.bounds.top;
         this.scaleDragStart = { ...res.holder.scale };
+        if (this.gestureProfile === 'terminal') return;
         res.holder.manualScale = { ...res.holder.scale };
         // The A (auto) chip must drop the moment the scale freezes — a wheel rescale
         // (or a stationary grab) changes the state with the cursor still, so the
@@ -2919,7 +2985,13 @@ export class NativeRenderer implements IChartRenderer {
         const holder = this.scaleDragHolder;
         const start = this.scaleDragStart;
         if (!holder || !start) return;
-        this.setManualScale(holder, rescaleAround(start, Math.exp(dyTotal * PRICE_SCALE_K)));
+        const padding = 0.2 * (this.scaleDragHeight - 1);
+        const factor = this.gestureProfile === 'terminal'
+            ? Math.max(0.1, (this.scaleDragHeight - this.scaleDragStartY + padding)
+                / (Math.max(this.scaleDragHeight - this.scaleDragStartY - dyTotal, 0) + padding))
+            : Math.exp(dyTotal * PRICE_SCALE_K);
+        this.setManualScale(holder, rescaleAround(start, factor));
+        this.axisScaleButtons?.reposition();
     }
 
     /** Grab inside the data area: vertical price-pan is available only when the pane is
@@ -2938,7 +3010,38 @@ export class NativeRenderer implements IChartRenderer {
         const holder = this.scaleDragHolder;
         const start = this.scaleDragStart;
         if (!holder || !start) return;
-        this.setManualScale(holder, shiftScale(start, dyTotal, this.scaleDragHeight));
+        const terminal = this.gestureProfile === 'terminal';
+        this.setManualScale(holder, shiftScale(start, dyTotal, terminal ? this.scaleDragHeight - 1 : this.scaleDragHeight, terminal && Boolean(start.invert)));
+    }
+
+    private beginPricePinch(x: number, y1: number, y2: number): void {
+        this.pricePinch = null;
+        const res = this.resolveScaleHolder(x, y1);
+        if (!res || res.pane !== this.paneNodeAtY(y2) || paneScaleMode(this.scene, res.pane) !== 'price' || res.height <= 0) return;
+        const scale = { ...res.holder.scale };
+        const bounds = { ...res.pane.bounds };
+        const logical = (y: number) => {
+            const price = this.coords.yToPrice(y, scale, bounds);
+            return scale.log ? Math.log(price) : price;
+        };
+        this.pricePinch = { holder: res.holder, scale, bounds, anchors: [logical(Math.min(y1, y2)), logical(Math.max(y1, y2))] };
+    }
+
+    private pricePinchTo(y1: number, y2: number): void {
+        const pinch = this.pricePinch;
+        if (!pinch) return;
+        const fraction = (y: number) => {
+            const u = (y - pinch.bounds.top) / pinch.bounds.height;
+            return pinch.scale.invert ? u : 1 - u;
+        };
+        const a = fraction(Math.min(y1, y2));
+        const b = fraction(Math.max(y1, y2));
+        const span = (pinch.anchors[1] - pinch.anchors[0]) / (b - a);
+        if (!Number.isFinite(span) || span <= 0) return;
+        const min = pinch.anchors[0] - span * a;
+        const max = min + span;
+        this.setManualScale(pinch.holder, { ...pinch.scale, min: pinch.scale.log ? Math.exp(min) : min, max: pinch.scale.log ? Math.exp(max) : max });
+        this.axisScaleButtons?.reposition();
     }
 
     /** Double-click the price axis → drop manual mode for that scale (autoscale resumes). */
@@ -2974,6 +3077,10 @@ export class NativeRenderer implements IChartRenderer {
         this.fitContent(); // clears all manual scales
         this.scheduler.invalidate(InvalidateLevel.Full);
         this.emitViewportChange();
+    }
+
+    private resetTimeScale(): void {
+        this.applyViewport({ barSpacing: 6, rightOffset: this.scene.style.margins.right });
     }
 
     private setManualScale(holder: ScaleHolder, scale: PriceScale): void {
@@ -4189,12 +4296,12 @@ export class NativeRenderer implements IChartRenderer {
             ? Math.max(...visible.map((p) => p.bounds.top + p.bounds.height))
             : dataHeight;
         // Extra collapsed strips below that pane push the button up by exactly their height.
-        this.scrollBtnBottomPx = SCROLL_BTN_BOTTOM + Math.max(0, dataHeight - paneBottom);
+        this.scrollBtnBottomPx = this.timeAxisHeight() + 14 + Math.max(0, dataHeight - paneBottom);
         // Publish the same inset as `--vela-bottom-gutter` (time axis + collapsed strips
         // below the lowest open pane) beside the left/right gutters, so host overlays
         // anchored to the plot's bottom edge (the workspace's shared attribution mark)
         // climb over collapsed strips exactly like the renderer's own bottom chrome.
-        this.mountContainer?.style.setProperty('--vela-bottom-gutter', `${TIME_AXIS_H + Math.max(0, dataHeight - paneBottom)}px`);
+        this.mountContainer?.style.setProperty('--vela-bottom-gutter', `${this.timeAxisHeight() + Math.max(0, dataHeight - paneBottom)}px`);
         // Clear the whole scale gutter (wider when merged own-scale columns are present), not just
         // the single master column — otherwise the button lands inside a multi-column scale.
         this.scrollBtnRightPx = this.rightAxisW + SCROLL_BTN_RIGHT_INSET;
@@ -4245,7 +4352,7 @@ export class NativeRenderer implements IChartRenderer {
      *  zero height — the mark does not appear on a study. */
     private publishPricePaneBounds(): void {
         if (!this.mountContainer) return;
-        const plotH = this.coords.height + TIME_AXIS_H;
+        const plotH = this.coords.height + this.timeAxisHeight();
         const price = this.scene.panes.get(PRICE_PANE_ID);
         const top = price ? price.bounds.top : 0;
         const height = price ? price.bounds.height : this.coords.height;
@@ -4256,9 +4363,10 @@ export class NativeRenderer implements IChartRenderer {
 
     /** The built-in mark, or the host's own when one is set. */
     private buildAttributionEl(): HTMLElement {
+        const background = backgroundCornerColor(this.theme.background, this.scene.style.backgroundGradient);
         return this.attributionHtml !== null
-            ? createCustomMark(document, this.attributionHtml, this.theme.background)
-            : createAttributionMark(document, this.theme.background);
+            ? createCustomMark(document, this.attributionHtml, background)
+            : createAttributionMark(document, background);
     }
 
     /** Swap the mark in place — the content kind changed (built-in ↔ host-supplied). */
@@ -4286,7 +4394,7 @@ export class NativeRenderer implements IChartRenderer {
             : dataHeight;
         Object.assign(this.attributionEl.style, {
             left: `${(this.toolbarGutter || 0) + 12}px`,
-            bottom: `${TIME_AXIS_H + 10 + Math.max(0, dataHeight - paneBottom)}px`,
+            bottom: `${this.timeAxisHeight() + 10 + Math.max(0, dataHeight - paneBottom)}px`,
         });
     }
 
@@ -4294,8 +4402,30 @@ export class NativeRenderer implements IChartRenderer {
      *  only gets the ink color — its own artwork keeps whatever colors it declares. */
     private refreshAttributionColor(): void {
         if (!this.attributionEl) return;
-        if (this.attributionHtml !== null) this.attributionEl.style.color = attributionMarkColor(this.theme.background);
-        else applyAttributionMarkTheme(this.attributionEl, this.theme.background);
+        const background = backgroundCornerColor(this.theme.background, this.scene.style.backgroundGradient);
+        if (this.attributionHtml !== null) this.attributionEl.style.color = attributionMarkColor(background);
+        else applyAttributionMarkTheme(this.attributionEl, background);
+    }
+
+    private timeAxisHeight(): number {
+        return this.reservedTimeAxisHeight;
+    }
+
+    private reserveTimeAxisHeight(availableHeight = Infinity): void {
+        if (this.scene.axisRendering === 'standard') {
+            this.reservedTimeAxisHeight = TIME_AXIS_H;
+            return;
+        }
+        const fontSize = this.scene.style.fontSize;
+        const optimal = Math.ceil(1 + 5 + fontSize + 3 * fontSize / 12 + 3 * fontSize / 12 + 4 * fontSize / 12);
+        const height = availableHeight - optimal >= 61 ? optimal : 0;
+        this.reservedTimeAxisHeight = height + height % 2;
+    }
+
+    private refreshAxisGeometry(): void {
+        this.reserveTimeAxisHeight();
+        if (this.wrapper && this.plot) this.syncSize();
+        if (this.settingsButton) this.settingsButton.style.bottom = `${this.timeAxisHeight() + 10}px`;
     }
 
     private syncSize(): void {
@@ -4332,6 +4462,8 @@ export class NativeRenderer implements IChartRenderer {
         // blends every horizontal edge 50/50 (measured, not theory). Never "compensate".
         const pw = bw / dpr;
         const ph = bh / dpr;
+        this.reserveTimeAxisHeight(rect.height);
+        if (this.settingsButton) this.settingsButton.style.bottom = `${this.timeAxisHeight() + 10}px`;
         const size = (canvas: HTMLCanvasElement): void => {
             canvas.width = bw;
             canvas.height = bh;
@@ -4348,7 +4480,7 @@ export class NativeRenderer implements IChartRenderer {
         size(this.cursorCanvas);
         // Reserve strips for the price axis (right) + time axis (bottom); the
         // data area drives the coordinate transform so series sit clear of them.
-        this.coords.setSize(Math.max(1, pw - this.rightAxisW), Math.max(1, ph - TIME_AXIS_H), dpr);
+        this.coords.setSize(Math.max(1, pw - this.rightAxisW), Math.max(1, ph - this.timeAxisHeight()), dpr);
         // Geometry changed — the retained crosshair {x,y} now points at the wrong
         // bar/price, so drop it (LWC hides the crosshair until the next move).
         this.scene.crosshair = null;
@@ -4373,7 +4505,7 @@ export class NativeRenderer implements IChartRenderer {
     }
 
     private applyBackground(): void {
-        this.wrapper.style.background = this.theme.background;
+        this.wrapper.style.background = backgroundCss(this.theme.background, this.scene.style.backgroundGradient);
     }
 }
 

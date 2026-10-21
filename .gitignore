@@ -4,3 +4,12 @@ dist/
 *.log
 .env.local
 .DS_Store
+local-app/dist/
+local-app/.runtime/
+local-app/.local-ui/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+.env
+local-app/electron/staging/
+local-app/electron/releases/

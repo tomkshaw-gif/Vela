@@ -68,6 +68,10 @@ const CSS = `
 }
 .vela-bb-range:hover { background: var(--vela-hover); color: var(--vela-fg-bright); }
 .vela-bb-range[data-active='1'] { color: var(--vela-fg-bright); background: var(--vela-hover); }
+.vela-bb-range:focus-visible, .vela-bb-date:focus-visible { outline: 2px solid var(--vela-focus); outline-offset: -2px; }
+.vela-bb-date { all: unset; display: flex; align-items: center; justify-content: center; flex: none; width: 32px; height: 30px; margin-left: 4px; border-left: 1px solid var(--vela-border); cursor: pointer; }
+.vela-bb-date:hover { color: var(--vela-fg-bright); background: var(--vela-hover); }
+.vela-bb-date svg { width: 22px; height: 22px; }
 .vela-bb-spacer { flex: 1 1 auto; }
 .vela-bb-clock { font-variant-numeric: tabular-nums; color: var(--vela-fg-bright); font-weight: 600; }
 .vela-bb-tz {
@@ -124,6 +128,10 @@ export interface BottombarOptions {
      *  (`renderer.setWallClock`) so every time display reads the same second; omitted,
      *  the bar runs its own second-aligned clock. */
     clock?: WallClock;
+    /** Omitted, use the library's default range shortcuts. An empty list hides them. */
+    rangePresets?: readonly RangePreset[];
+    onDateJump?: () => void;
+    sessionControls?: boolean;
     onRange: (preset: RangePreset) => void;
     onTimezone: (zone: string) => void;
     /** RTH/ETH toggled by the user. Fires only while the toggle is ENABLED (see {@link Bottombar.setSession}). */
@@ -144,17 +152,20 @@ export class Bottombar {
     private timezone: string;
     private exchangeTimezone: string | undefined;
     private readonly unsubClock: Unsubscribe;
+    private readonly sessionControls: boolean;
 
     constructor(host: HTMLElement, opts: BottombarOptions) {
         this.timezone = opts.timezone;
         this.exchangeTimezone = opts.exchangeTimezone;
+        this.sessionControls = opts.sessionControls !== false;
         const doc = host.ownerDocument;
         injectStyles(STYLE_ID, CSS, doc);
 
         this.el = doc.createElement('div');
         this.el.className = 'vela-widget-bottombar';
-        for (const preset of RANGE_PRESETS) {
+        for (const preset of opts.rangePresets ?? RANGE_PRESETS) {
             const b = doc.createElement('button');
+            b.type = 'button';
             b.className = 'vela-bb-range';
             b.textContent = preset.id;
             b.addEventListener('click', () => {
@@ -163,6 +174,14 @@ export class Bottombar {
             });
             this.rangeButtons.set(preset.id, b);
             this.el.appendChild(b);
+        }
+        if (opts.onDateJump) {
+            const date = doc.createElement('button');
+            date.type = 'button'; date.className = 'vela-bb-date';
+            date.setAttribute('aria-label', 'Go to date'); date.title = 'Go to date';
+            date.appendChild(iconEl('calendar', doc));
+            date.addEventListener('click', opts.onDateJump);
+            this.el.append(date);
         }
         const spacer = doc.createElement('span');
         spacer.className = 'vela-bb-spacer';
@@ -257,10 +276,11 @@ export class Bottombar {
      * chart's current session.
      */
     setSession(state: { session: 'regular' | 'extended'; enabled: boolean }): void {
-        if (this.sessionEl) this.sessionEl.style.display = state.enabled ? '' : 'none';
+        const enabled = this.sessionControls && state.enabled;
+        if (this.sessionEl) this.sessionEl.style.display = enabled ? '' : 'none';
         for (const [key, b] of this.sessionButtons) {
-            b.disabled = !state.enabled;
-            b.classList.toggle('is-active', key === (state.enabled ? state.session : 'regular'));
+            b.disabled = !enabled;
+            b.classList.toggle('is-active', key === (enabled ? state.session : 'regular'));
         }
     }
 

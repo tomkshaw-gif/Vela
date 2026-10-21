@@ -1,4 +1,5 @@
 import type { VelaTheme } from '../../../core/options';
+import { backgroundPaint, type BackgroundGradient } from '../core/background';
 import type { IndicatorModel } from '../../../core/model/indicator';
 import type { OHLCV } from '../../../core/model/ohlcv';
 import type { LineStyle } from '../../../core/model/series';
@@ -111,7 +112,7 @@ export class ChromeRenderer {
      *  `surface` (background + text) paints the axis-scale gutters — the host passes the live
      *  chart background so the scales read as part of the plot, with contrast-corrected text.
      *  Falls back to the theme's own colors when no surface is supplied. */
-    render(scene: SceneGraph, coords: CoordinateSystem, theme: VelaTheme, surface?: { background: string; textColor: string }): void {
+    render(scene: SceneGraph, coords: CoordinateSystem, theme: VelaTheme, surface?: { background: string; textColor: string; backgroundGradient?: BackgroundGradient | null }): void {
         const ctx = this.ctx;
         const canvas = this.canvas;
         if (!ctx || !canvas) return;
@@ -130,7 +131,7 @@ export class ChromeRenderer {
         // series pixels beneath never bleed into the scales. Data/drawings stay clear of
         // these strips, so this only ever covers the axis areas.
         if (surface && (fullW > dataW || fullH > dataH)) {
-            ctx.fillStyle = surface.background;
+            ctx.fillStyle = backgroundPaint(ctx, surface.background, surface.backgroundGradient, fullH);
             if (fullW > dataW) ctx.fillRect(dataW, 0, fullW - dataW, fullH);
             if (fullH > dataH) ctx.fillRect(0, dataH, dataW, fullH - dataH);
         }
@@ -268,40 +269,63 @@ export class ChromeRenderer {
 
     // ── axes ──
     private drawPriceAxes(ctx: CanvasRenderingContext2D, scene: SceneGraph, coords: CoordinateSystem, theme: VelaTheme, dataW: number, panes: PaneNode[]): void {
-        ctx.strokeStyle = scene.style.borderColor ?? theme.borderColor;
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.moveTo(dataW + 0.5, 0);
-        ctx.lineTo(dataW + 0.5, coords.height);
-        ctx.stroke();
+        const terminal = scene.axisRendering === 'terminal';
+        const ratio = coords.dpr;
+        if (terminal) {
+            ctx.fillStyle = scene.style.borderColor ?? theme.borderColor;
+            ctx.fillRect(Math.round(dataW * ratio) / ratio, 0,
+                Math.max(1, Math.floor(ratio)) / ratio, Math.round(coords.height * ratio) / ratio);
+        } else {
+            ctx.strokeStyle = scene.style.borderColor ?? theme.borderColor;
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(dataW + 0.5, 0);
+            ctx.lineTo(dataW + 0.5, coords.height);
+            ctx.stroke();
+        }
         if (!scene.showAxisLabels) return;
         ctx.fillStyle = this.axisTextColor;
         ctx.textAlign = 'left';
         const font = `${scene.style.fontSize}px ${theme.fontFamily}`;
-        const majorFont = `600 ${font}`;
+        const majorFont = `${terminal ? 'bold' : '600'} ${font}`;
+        const x = dataW + (terminal ? Math.round(scene.style.fontSize / 12 * 8 * ratio) / ratio : 6);
+        if (terminal) {
+            ctx.font = font;
+            ctx.textBaseline = 'middle';
+        }
         const alpha = ctx.globalAlpha;
         for (const pane of panes) {
             if (pane.collapsed) continue; // collapsed strip: legend only, no scale numbers
             for (const t of this.axisTicks.ticksFor(scene, pane, coords)) {
                 const y = coords.priceToY(t.price, pane.scale, pane.bounds);
-                if (y < pane.bounds.top + 6 || y > pane.bounds.top + pane.bounds.height - 4) continue;
-                if (t.major === true) ctx.font = majorFont;
-                else if (t.major === false) ctx.globalAlpha = alpha * MINOR_LABEL_ALPHA;
-                ctx.fillText(t.label, dataW + 6, y);
+                const topPadding = terminal ? scene.style.fontSize / 2 : 6;
+                const bottomPadding = terminal ? scene.style.fontSize / 2 : 4;
+                if (y < pane.bounds.top + topPadding || y > pane.bounds.top + pane.bounds.height - bottomPadding) continue;
+                const correction = terminal ? this.priceLabelCorrection(ctx, t.label) : 0;
+                if (t.major === true && (!terminal || !pane.scale.log)) ctx.font = majorFont;
+                else if (t.major === false && !terminal) ctx.globalAlpha = alpha * MINOR_LABEL_ALPHA;
+                ctx.fillText(t.label, x, y + correction);
                 if (t.major === true) ctx.font = font;
-                else if (t.major === false) ctx.globalAlpha = alpha;
+                else if (t.major === false && !terminal) ctx.globalAlpha = alpha;
             }
             // A paneAxis-overridden pane labels its bands instead of prices (a
             // categorical axis) — same column, same typography as the price ticks.
             if (pane.axisBands) {
                 for (const b of pane.axisBands) {
                     const y = pane.bounds.top + b.frac * pane.bounds.height;
-                    if (y < pane.bounds.top + 6 || y > pane.bounds.top + pane.bounds.height - 4) continue;
-                    ctx.fillText(b.label, dataW + 6, y);
+                    if (y < pane.bounds.top + (terminal ? scene.style.fontSize / 2 : 6)
+                        || y > pane.bounds.top + pane.bounds.height - (terminal ? scene.style.fontSize / 2 : 4)) continue;
+                    ctx.fillText(b.label, x, y + (terminal ? this.priceLabelCorrection(ctx, b.label) : 0));
                 }
             }
         }
         ctx.textAlign = 'start';
+    }
+
+    private priceLabelCorrection(ctx: CanvasRenderingContext2D, label: string): number {
+        const metrics = ctx.measureText(label);
+        return metrics.actualBoundingBoxAscent !== undefined && metrics.actualBoundingBoxDescent !== undefined
+            ? (metrics.actualBoundingBoxAscent - metrics.actualBoundingBoxDescent) / 2 : 0;
     }
 
     /**
@@ -340,8 +364,11 @@ export class ChromeRenderer {
                 const x = axisColumnX(dataW, k + 1); // column 0 is the master scale
                 for (const t of paneAxisTicks(sc, pane.bounds.height, undefined, scene.priceMintick)) {
                     const y = coords.priceToY(t.price, sc, pane.bounds);
-                    if (y < pane.bounds.top + 6 || y > pane.bounds.top + pane.bounds.height - 4) continue;
-                    ctx.fillText(t.label, x + 5, y);
+                    const terminal = scene.axisRendering === 'terminal';
+                    if (y < pane.bounds.top + (terminal ? scene.style.fontSize / 2 : 6)
+                        || y > pane.bounds.top + pane.bounds.height - (terminal ? scene.style.fontSize / 2 : 4)) continue;
+                    const padding = terminal ? Math.round(scene.style.fontSize / 12 * 8 * coords.dpr) / coords.dpr : 5;
+                    ctx.fillText(t.label, x + padding, y + (terminal ? this.priceLabelCorrection(ctx, t.label) : 0));
                 }
             });
         }
@@ -448,16 +475,24 @@ export class ChromeRenderer {
     }
 
     private drawTimeAxis(ctx: CanvasRenderingContext2D, scene: SceneGraph, coords: CoordinateSystem, theme: VelaTheme, dataW: number, dataH: number, fullH: number): void {
-        ctx.strokeStyle = scene.style.borderColor ?? theme.borderColor;
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.moveTo(0, dataH + 0.5);
-        ctx.lineTo(dataW, dataH + 0.5);
-        ctx.stroke();
+        const terminal = scene.axisRendering === 'terminal';
+        if (terminal) {
+            const ratio = coords.dpr;
+            ctx.fillStyle = scene.style.borderColor ?? theme.borderColor;
+            ctx.fillRect(0, Math.round(dataH * ratio) / ratio,
+                Math.round(dataW * ratio) / ratio, Math.max(1, Math.floor(ratio)) / ratio);
+        } else {
+            ctx.strokeStyle = scene.style.borderColor ?? theme.borderColor;
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(0, dataH + 0.5);
+            ctx.lineTo(dataW, dataH + 0.5);
+            ctx.stroke();
+        }
         if (!scene.showAxisLabels) return;
         ctx.fillStyle = this.axisTextColor;
         ctx.textAlign = 'center';
-        const y = dataH + (fullH - dataH) / 2;
+        const y = dataH + (terminal ? 1 + 5 + 3 * scene.style.fontSize / 12 + scene.style.fontSize / 2 : (fullH - dataH) / 2);
         const tr = coords.visibleTimeRange();
         const offset = tzOffsetMs((tr.from + tr.to) / 2, scene.timezone);
         // Width-adaptive density so a narrow surface — a phone, a multi-chart cell —

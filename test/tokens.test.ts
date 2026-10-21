@@ -58,6 +58,19 @@ describe('themeTokens', () => {
         expect(themeTokens(LIGHT_THEME)['--vela-accent']).toBe(ACCENT);
     });
 
+    it('derives terminal legend contrast from the surface independently of custom title ink', () => {
+        for (const textColor of ['#777777', '#abcdef']) {
+            const light = themeTokens({ ...LIGHT_THEME, textColor });
+            const dark = themeTokens({ ...DARK_THEME, textColor });
+            expect(light['--vela-legend-action-ink-default']).toBe('#0f0f0f');
+            expect(dark['--vela-legend-action-ink-default']).toBe('#dbdbdb');
+            expect(light['--vela-legend-hidden-ink-default']).toBe('#b8b8b8');
+            expect(dark['--vela-legend-hidden-ink-default']).toBe('#575757');
+            expect(light).not.toHaveProperty('--vela-legend-action-ink');
+            expect(dark).not.toHaveProperty('--vela-legend-hidden-ink');
+        }
+    });
+
     it('emits every token in both themes so no chrome falls back to an unset variable', () => {
         const dark = Object.keys(themeTokens(DARK_THEME)).sort();
         const light = Object.keys(themeTokens(LIGHT_THEME)).sort();

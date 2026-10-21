@@ -1,0 +1,195 @@
+#standard-workspace .local-reference-chrome[data-layout='desktop'] > .vela-widget-topbar {
+    height:42px; min-height:42px; padding:0 4px; gap:2px;
+    border-bottom:4px solid var(--vela-border); box-sizing:border-box;
+}
+#standard-workspace .local-reference-chrome[data-layout='desktop'] .vela-widget-topbar :is(.vela-widget-symbol,.vela-widget-tf,.vela-widget-tf-caret,.vela-widget-tf-chip,.vela-widget-style,.vela-widget-indicators,.vela-widget-tool,.vela-widget-action-left,.vela-widget-action-right) {
+    height:38px; min-height:38px; border:0; border-radius:0; padding:0 7px; font-size:14px;
+}
+#standard-workspace .local-reference-chrome[data-layout='desktop'] .vela-widget-topbar :is(.vela-widget-tool,.vela-widget-style) {
+    width:38px; min-width:38px; padding:0 5px;
+}
+#standard-workspace .local-reference-chrome[data-layout='desktop'] .vela-widget-topbar .vela-icon {
+    width:28px; height:28px; font-size:28px;
+}
+#standard-workspace .local-reference-chrome[data-layout='desktop'] .vela-widget-topbar .vela-widget-tf-caret {
+    width:20px; min-width:20px; padding:0 2px;
+}
+#standard-workspace .local-reference-chrome[data-layout='desktop'] .vela-widget-topbar .vela-widget-tf-caret .vela-icon {
+    width:12px; height:12px; font-size:12px;
+}
+#standard-workspace .local-reference-chrome[data-layout='desktop'] .vela-widget-topbar .vela-widget-tf-caret[data-solo='1'] {
+    width:auto; padding:0 7px;
+}
+#standard-workspace .local-reference-chrome[data-layout='desktop'] .vela-widget-topbar .vela-widget-symbol {
+    gap:5px; margin:3px 2px; height:30px; min-height:30px; padding:0 9px 0 5px;
+    border-radius:18px; background:var(--vela-hover); font-size:14px; font-weight:600;
+}
+.local-symbol-glyph { display:inline-flex; flex:none; width:24px; height:24px; }
+.local-symbol-glyph svg { width:100%; height:100%; }
+#standard-workspace .local-reference-chrome[data-layout='desktop'] .vela-widget-topbar .vela-widget-tf[data-current='1'] {
+    height:28px; min-height:28px; border-radius:14px; background:var(--vela-hover-strong); color:var(--vela-accent);
+}
+#standard-workspace .local-reference-chrome[data-layout='desktop'] .vela-widget-topbar .vela-widget-alerts {
+    width:auto; min-width:76px; gap:3px; padding:0 7px 0 3px;
+}
+.local-alert-label { font-size:14px; font-weight:500; }
+#standard-workspace .local-reference-chrome[data-layout='desktop'] .vela-widget-topbar .vela-widget-action {
+    display:inline-flex; align-items:center; justify-content:center; gap:3px; height:38px; min-height:38px;
+    padding:0 7px; border:0; border-radius:4px; background:transparent; color:var(--vela-fg); font:inherit; font-size:14px; cursor:pointer;
+}
+#standard-workspace .local-reference-chrome[data-layout='desktop'] .vela-widget-topbar [data-local-action='local.tradeShortcut'] {
+    padding:0 14px; margin:4px 3px; height:30px; min-height:30px; background:var(--vela-hover); border-radius:5px;
+}
+#standard-workspace .local-reference-chrome[data-layout='desktop'] .vela-widget-topbar [data-local-action='local.replayToggle'][aria-pressed='true'] {
+    color:var(--vela-accent); background:var(--vela-active);
+}
+#standard-workspace .local-reference-chrome[data-layout='desktop'] .vela-widget-topbar .vela-widget-action-pin:has([data-local-action='local.replayToggle'])::before {
+    content:''; width:1px; height:22px; margin:0 6px; background:var(--vela-border-strong);
+}
+#standard-workspace .local-reference-chrome[data-layout='desktop'] .vela-widget-topbar .vela-widget-undo {
+    border-left:1px solid var(--vela-border-strong); margin-left:5px; border-radius:0;
+}
+#standard-workspace .local-reference-chrome[data-layout='desktop'] .vela-widget-topbar [data-local-layout='true'] {
+    width:auto; min-width:0; gap:4px; padding:0 4px;
+}
+#standard-workspace .local-reference-chrome[data-layout='desktop'] .vela-widget-topbar [data-local-layout='true'] > .vela-icon {
+    width:20px; height:20px; font-size:20px;
+}
+.local-layout-name { max-width:150px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px; font-weight:500; }
+.local-layout-caret { font-size:14px; color:var(--vela-fg-muted); }
+.local-layout-save { align-self:center; height:28px; padding:0 4px; margin-right:6px; border:0; background:transparent;
+    color:var(--vela-fg-muted); font-size:10px; white-space:nowrap; cursor:pointer; }
+.local-layout-save[data-state='error'] { color:var(--vela-danger,#f23645); }
+.local-layout-save:disabled { cursor:default; }
+#standard-workspace .local-reference-chrome[data-layout='desktop'] .vela-topbar-right > .vela-bb-settings {
+    flex:none; display:inline-flex; align-items:center; justify-content:center; width:38px; height:38px; padding:5px;
+    border:0; border-radius:4px; color:var(--vela-fg); background:transparent;
+}
+#standard-workspace .local-reference-chrome[data-layout='desktop'] .vela-topbar-right > .vela-bb-settings .vela-icon {
+    width:28px; height:28px; font-size:28px;
+}
+#standard-workspace .local-reference-chrome[data-layout='desktop'] .vela-widget-topbar :is(.vela-widget-action,.vela-bb-settings,.local-layout-save):hover:enabled {
+    background:var(--vela-hover); color:var(--vela-fg-bright);
+}
+#standard-workspace .local-reference-chrome[data-layout='desktop'] .vela-widget-topbar button:focus-visible {
+    outline:2px solid var(--vela-focus); outline-offset:-2px;
+}
+#standard-workspace .local-reference-chrome[data-layout='desktop'] > .vela-ws-main { margin-right:49px; }
+#standard-workspace .local-reference-chrome[data-layout='desktop'] .vela-ws-grid { margin-left:4px; }
+#standard-workspace .local-reference-chrome[data-layout='desktop'] .vela-dtb:not([data-collapsed='1']) {
+    padding-top:6px !important;
+}
+#standard-workspace .local-reference-chrome[data-layout='desktop'] .vela-dtb > div:not([class]):nth-child(2) {
+    height:0 !important; margin:0 !important;
+}
+#standard-workspace .local-reference-chrome[data-layout='desktop'] .vela-widget-panels {
+    top:42px; bottom:0; padding:2px 0; gap:2px;
+}
+#standard-workspace .local-reference-chrome[data-layout='desktop'] .vela-widget-panels > :is(.vela-widget-tool,.vela-bb-settings) {
+    width:44px; height:44px; min-width:44px; min-height:44px; flex:none;
+    display:flex; align-items:center; justify-content:center; padding:0; border:0; border-radius:0;
+    color:var(--vela-fg); background:transparent;
+}
+#standard-workspace .local-reference-chrome[data-layout='desktop'] .vela-widget-panels > [data-local-panel='local.assistant'] { margin-top:auto; }
+#standard-workspace .local-reference-chrome[data-layout='desktop'] .vela-widget-panels > :is([data-local-panel='local.templates'],[data-local-panel='local.trade']) { display:none; }
+#standard-workspace .local-reference-chrome[data-layout='desktop'] .vela-widget-panels > [data-local-panel='local.pine'] { margin-top:8px; }
+#standard-workspace .local-reference-chrome[data-layout='desktop'] .vela-widget-panels > [data-local-panel='dataWindow'] .vela-icon,
+#standard-workspace .local-reference-chrome[data-layout='desktop'] .vela-widget-panels > [data-local-panel='objects'] .vela-icon {
+    width:22px; height:22px; font-size:22px;
+}
+#standard-workspace .local-reference-chrome[data-layout='desktop'] .vela-widget-panels > .vela-bb-settings { margin-top:0; }
+#standard-workspace .local-reference-chrome[data-layout='desktop'] .vela-widget-panels > :is(.vela-widget-tool,.vela-bb-settings):hover {
+    color:var(--vela-fg-bright); background:var(--vela-hover);
+}
+#standard-workspace .local-reference-chrome[data-layout='desktop'] .vela-widget-panels > :is(.vela-widget-tool,.vela-bb-settings):focus-visible {
+    outline:2px solid var(--vela-focus); outline-offset:-3px;
+}
+.local-cached-watchlist { padding:10px; color:var(--vela-fg); }
+.local-watchlist-note,.local-watchlist-status { margin:0 0 12px; font-size:11px; color:var(--vela-fg-muted); line-height:1.5; }
+.local-watchlist-refresh,.local-watchlist-session,.local-watchlist-sessions { display:block; width:100%; padding:8px; text-align:left;
+    border:0; border-radius:4px; background:transparent; color:var(--vela-fg); font:inherit; font-size:12px; cursor:pointer; }
+.local-watchlist-refresh { margin-bottom:10px; color:var(--vela-accent); }
+.local-watchlist-contract { padding:10px 0; border-top:1px solid var(--vela-border); }
+.local-watchlist-contract > strong { display:block; padding:0 8px; font-size:13px; }
+.local-watchlist-contract > small { display:block; padding:5px 8px; font-size:10px; color:var(--vela-fg-muted); }
+.local-watchlist-session[aria-current='true'] { color:var(--vela-accent); background:var(--vela-active); cursor:default; }
+:is(.local-watchlist-refresh,.local-watchlist-session,.local-watchlist-sessions):hover:enabled { background:var(--vela-hover); }
+:is(.local-watchlist-refresh,.local-watchlist-session,.local-watchlist-sessions):focus-visible { outline:2px solid var(--vela-focus); outline-offset:-2px; }
+@media(min-width:601px) and (max-width:1450px) {
+    #standard-workspace .local-reference-chrome[data-layout='desktop'] .vela-widget-topbar .vela-widget-tf { padding:0 3px; font-size:13px; }
+    #standard-workspace .local-reference-chrome[data-layout='desktop'] .vela-widget-topbar .vela-widget-indicators { font-size:0; gap:0; padding:0 4px; }
+    #standard-workspace .local-reference-chrome[data-layout='desktop'] .vela-widget-topbar .vela-widget-alerts { min-width:68px; padding:0 4px; }
+    #standard-workspace .local-reference-chrome[data-layout='desktop'] .vela-widget-topbar [data-local-action='local.templatesShortcut'] { padding:0 5px; }
+    .local-layout-name { max-width:80px; }
+    .local-layout-save { width:22px; min-width:22px; padding:0; margin:0; font-size:0; }
+    .local-layout-save::after { content:'•'; font-size:14px; }
+    .local-layout-save[data-state='saved']::after { content:'✓'; }
+    .local-layout-save[data-state='saving']::after { content:'↻'; }
+    .local-layout-save[data-state='error']::after { content:'!'; }
+}
+@media(min-width:601px) and (max-width:1100px) {
+    #standard-workspace .local-reference-chrome[data-layout='desktop'] .vela-widget-topbar .vela-widget-tf:not([data-current='1']) { display:none; }
+    #standard-workspace .local-reference-chrome[data-layout='desktop'] .vela-widget-topbar .vela-widget-indicators { font-size:0; gap:0; padding:0 4px; }
+    .local-layout-name { max-width:80px; }
+}
+#standard-workspace .local-reference-chrome[data-layout='desktop'] :is(.local-replay-strip,.vela-widget-bottombar) {
+    margin-left:calc(var(--local-reference-left,52px) + 4px); margin-right:49px;
+}
+#standard-workspace .local-reference-chrome .local-replay-strip .transport {
+    min-height:48px; gap:4px; padding:5px 8px; flex-wrap:nowrap;
+}
+#standard-workspace .local-reference-chrome .local-replay-strip .transport-main { gap:0; }
+#standard-workspace .local-reference-chrome .local-replay-strip .replay-button {
+    width:38px; height:38px; min-width:38px; min-height:38px; padding:5px; gap:0;
+    border:0; border-radius:4px; background:transparent; color:var(--vela-fg); font-size:12px;
+}
+#standard-workspace .local-reference-chrome .local-replay-strip .replay-button:hover:enabled {
+    background:var(--vela-hover); color:var(--vela-fg-bright);
+}
+#standard-workspace .local-reference-chrome .local-replay-strip .replay-button[aria-pressed='true'],
+#standard-workspace .local-reference-chrome .local-replay-strip #play[aria-label='Pause replay'] {
+    color:var(--vela-accent); background:var(--vela-active);
+}
+#standard-workspace .local-reference-chrome .local-replay-strip .replay-button > span:not(.replay-control-icon),
+#standard-workspace .local-reference-chrome .local-replay-strip .replay-speed-label > span {
+    position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap;
+}
+#standard-workspace .local-reference-chrome .local-replay-strip :is(.replay-control-icon,.replay-button > svg) {
+    width:28px; height:28px; flex:none;
+}
+#standard-workspace .local-reference-chrome .local-replay-strip .transport-go { order:-1; margin-right:6px; }
+#standard-workspace .local-reference-chrome .local-replay-strip .transport-go .replay-button {
+    width:auto; min-width:75px; gap:4px; padding:0 6px;
+}
+#standard-workspace .local-reference-chrome .local-replay-strip .transport-go .replay-button > span:not(.replay-control-icon) {
+    position:static; width:auto; height:auto; overflow:visible; clip-path:none;
+}
+#standard-workspace .local-reference-chrome .local-replay-strip .local-replay-label { display:none; }
+#standard-workspace .local-reference-chrome .local-replay-strip .replay-speed-label { gap:0; margin:0 6px; }
+#standard-workspace .local-reference-chrome .local-replay-strip #speed {
+    height:38px; min-height:38px; min-width:58px; border-color:transparent; background:transparent; font-size:14px;
+}
+#standard-workspace .local-reference-chrome .local-replay-strip .transport-divider { height:22px; margin:0 9px; }
+#standard-workspace .local-reference-chrome .local-replay-strip .cursor-time {
+    min-width:0; font-size:11px; white-space:nowrap; font-variant-numeric:tabular-nums;
+}
+#standard-workspace .local-reference-chrome[data-layout='desktop'] > .vela-widget-bottombar {
+    height:38px; min-height:38px; padding:0 4px; font-size:12px;
+}
+#standard-workspace .template-capture > h2 { display:none; }
+#standard-workspace .local-reference-chrome[data-layout='desktop'] .vela-bb-range { height:30px; font-size:12px; }
+@media(max-width:900px) {
+    #standard-workspace .local-reference-chrome .local-replay-strip .cursor-time { display:none; }
+}
+@media(max-width:600px) {
+    #standard-workspace .local-reference-chrome .local-replay-strip .transport {
+        display:flex; flex-wrap:wrap; justify-content:center; padding:5px 3px; gap:2px;
+    }
+    #standard-workspace .local-reference-chrome .local-replay-strip .transport-main { flex:none; }
+    #standard-workspace .local-reference-chrome .local-replay-strip .transport-go { margin-right:0; }
+    #standard-workspace .local-reference-chrome .local-replay-strip .transport-go .replay-button { min-width:62px; font-size:11px; }
+    #standard-workspace .local-reference-chrome .local-replay-strip .replay-speed-label { margin:0; }
+    #standard-workspace .local-reference-chrome .local-replay-strip #speed { min-width:52px; padding-right:14px; }
+    #standard-workspace .local-reference-chrome .local-replay-strip .transport-divider { display:none; }
+    #standard-workspace .local-reference-chrome .local-replay-strip .jump-status { flex-basis:100%; text-align:center; }
+}

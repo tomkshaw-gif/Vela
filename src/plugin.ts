@@ -139,6 +139,7 @@ export type {
     VisibleBarRange,
     BarsChangeReason,
     EngineContextSnapshot,
+    EngineComputationIdentity,
     ContextSelect,
 } from './core/ports/ScriptingEngine';
 export type { MarketDataFeed, SymbolInfo, BarRange } from './core/ports/MarketDataFeed';

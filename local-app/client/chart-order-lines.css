@@ -1,0 +1,24 @@
+.local-chart-orders{position:absolute;inset:0;pointer-events:none;z-index:14;overflow:hidden;font:normal 13px/17px var(--vela-font-family,Arial,sans-serif)}
+.local-chart-orders [hidden]{display:none!important}
+.local-order-line{position:absolute;display:flex;align-items:center;gap:11px;transform:translate(-100%,-50%);color:var(--order-color,#2962ff);white-space:nowrap;pointer-events:none}
+.local-order-side{display:block;height:19px;box-sizing:border-box;padding:0 7px;border:1px solid var(--order-color);border-radius:4px;background:var(--order-color);color:#fff;line-height:17px}
+.local-order-body{display:flex;height:19px;box-sizing:border-box;border:1px solid var(--order-color);border-radius:4px;background:var(--local-order-surface);overflow:hidden;pointer-events:auto}
+.local-order-line[data-kind=takeProfit] .local-order-body,.local-order-line[data-kind=stopLoss] .local-order-body{border-style:dotted}
+.local-order-line[data-position-bracket=true] .local-order-body,.local-order-line[data-kind=position] .local-order-body{border-radius:9px}
+.local-order-line[data-moving=true] .local-order-body{box-shadow:0 0 0 2px color-mix(in srgb,var(--order-color) 18%,transparent)}
+.local-chart-orders .local-order-line button{display:flex;align-items:center;justify-content:center;min-height:0;height:17px;box-sizing:border-box;margin:0;padding:0;background:transparent;border:0;border-radius:0;color:inherit;font:inherit;line-height:17px;cursor:ns-resize;pointer-events:auto;touch-action:none;user-select:none}
+.local-chart-orders .local-order-replay{display:block;box-sizing:content-box;width:8px;height:8px;padding-left:7px;fill:currentColor;flex-shrink:0}
+.local-order-quantity{display:flex;align-items:center;justify-content:center;min-width:19px;height:17px;box-sizing:border-box;padding:0 7px;font-variant-numeric:tabular-nums}
+.local-order-text{display:flex;align-items:center;justify-content:center;height:17px;padding:0 7px;border-left:1px solid color-mix(in srgb,var(--order-color) 16%,transparent);font-variant-numeric:tabular-nums}
+.local-order-line[data-kind=position] .local-order-replay,.local-order-line[data-position-bracket=true] .local-order-replay{background:var(--order-color);color:#fff}
+.local-order-line[data-kind=position] .local-order-quantity,.local-order-line[data-position-bracket=true] .local-order-quantity{background:var(--order-color);color:#fff}
+.local-order-line[data-kind=position] .local-order-text[data-profit=positive]{color:#089981}
+.local-order-line[data-kind=position] .local-order-text[data-profit=negative]{color:#f23645}
+.local-chart-orders .local-order-line button:disabled{cursor:default}
+.local-chart-orders .local-order-line button.local-order-cancel{border-left:1px solid color-mix(in srgb,var(--order-color) 16%,transparent);cursor:pointer;width:23px;flex-shrink:0}
+.local-order-cancel svg{display:block;width:7px;height:7px;fill:none;stroke:currentColor;stroke-width:1;overflow:visible;pointer-events:none}
+.local-chart-orders .local-order-line button:hover:enabled{background:color-mix(in srgb,var(--order-color) 12%,transparent)}
+.local-chart-orders .local-order-line button:focus-visible{outline:2px solid var(--order-color);outline-offset:-2px}
+.local-order-axis-price{position:absolute;right:0;box-sizing:border-box;height:19px;padding:0 7px;transform:translateY(-50%);border:1px solid var(--order-color);border-radius:2px;background:var(--local-order-surface);color:var(--order-color);white-space:nowrap;font-variant-numeric:tabular-nums;line-height:17px;text-align:left;pointer-events:none}
+.local-order-axis-price[data-kind=takeProfit],.local-order-axis-price[data-kind=stopLoss]{border-style:dotted}
+@media(pointer:coarse){.local-order-side,.local-order-body,.local-order-axis-price{height:23px}.local-order-side,.local-order-axis-price{line-height:21px}.local-chart-orders .local-order-line button,.local-order-quantity,.local-order-text{height:21px;line-height:21px}}

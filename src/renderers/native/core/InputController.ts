@@ -9,8 +9,10 @@ export interface InputControllerDeps {
     apply(viewport: ViewportState): void;
     /** Eased cursor-anchored zoom: glide barSpacing → target, pinning `anchorLogical` at `anchorX`. */
     zoomTo(targetBarSpacing: number, anchorLogical: number, anchorX: number): void;
+    /** Immediate, discrete time zoom. The renderer clamps spacing before restoring the cursor bar. */
+    zoomTime?(x: number, step: number, forceCursor: boolean): void;
     /** Inertial pan: continue with this rightOffset velocity (logical units per ms) + decelerate. */
-    fling(rightOffsetVelocity: number): void;
+    fling(rightOffsetVelocity: number, durationMs?: number): void;
     /** Pointer moved over the chart (for the crosshair); null when it leaves. */
     onPointerMove(x: number | null, y: number | null): void;
     onClick(x: number, y: number): void;
@@ -23,6 +25,9 @@ export interface InputControllerDeps {
     beginPricePan(y: number): boolean;
     /** Pan the grabbed pane's price window by the TOTAL pixel drag (down ⇒ show lower prices). */
     pricePanBy(dyTotal: number): void;
+    /** Two price-axis contacts: snapshot their values on the first move, then fit both anchors. */
+    beginPricePinch?(x: number, y1: number, y2: number): void;
+    pricePinchTo?(y1: number, y2: number): void;
     /** Double-click on the price axis → re-enable autoscale for the pane/column at (`x`,`y`). */
     resetPriceScale(x: number, y: number): void;
     /**
@@ -43,6 +48,8 @@ export interface InputControllerDeps {
     resetPaneSize(y: number): void;
     /** Double-click the time axis → fit the view to content (same as keyboard `0`). */
     resetView(): void;
+    /** Reset only the time-axis spacing and placement, preserving pane scales. */
+    resetTimeScale?(): void;
     /** Touch long-press on the price or time axis strip (the mobile substitute for a
      *  right-click menu — host chrome opens a timezone / price-scale sheet). */
     onAxisLongPress?(axis: 'price' | 'time', x: number, y: number): void;
@@ -118,7 +125,7 @@ const WHEEL_PRICE_DRAG_PX = 0.25;
  *  time axis, a sub-pane separator (drag to resize the panes above/below it), or one of
  *  the touch-only modes: a two-finger pinch, long-press crosshair inspection, or a
  *  long-press that opened an axis sheet (no further drag for that gesture). */
-type DragRegion = 'data' | 'price' | 'time' | 'separator' | 'drawing' | 'pinch' | 'crosshair' | 'axis-sheet';
+type DragRegion = 'data' | 'price' | 'time' | 'separator' | 'drawing' | 'pinch' | 'price-pinch' | 'pinch-suspended' | 'crosshair' | 'axis-sheet';
 
 /**
  * The logical bar + its pixel that a wheel-zoom keeps pinned. `right` (the default)
@@ -188,6 +195,31 @@ export function pinchPinnedRightOffset(anchorLogical: number, barCount: number, 
     return anchorLogical - (barCount - 1) + (width - x) / pxPerBar;
 }
 
+export interface PanSample { x: number; time: number }
+
+/** Distance-weighted recent velocity; a direction reversal discards older segments. */
+export function terminalPanSpeed(samples: readonly PanSample[], releaseTime: number): number {
+    const latest = samples[samples.length - 1];
+    if (!latest || releaseTime - latest.time > 50 || samples.length < 2) return 0;
+    let direction = 0;
+    let weighted = 0;
+    let distance = 0;
+    for (let i = samples.length - 1; i > 0; i--) {
+        const a = samples[i]!;
+        const b = samples[i - 1]!;
+        const dt = a.time - b.time;
+        if (dt <= 0) break;
+        const speed = Math.max(-7, Math.min(7, (a.x - b.x) / dt));
+        if (i === samples.length - 1) direction = Math.sign(speed);
+        else if (Math.sign(speed) !== direction) break;
+        const segment = Math.abs(a.x - b.x);
+        weighted += speed * segment;
+        distance += segment;
+    }
+    const speed = distance > 0 ? weighted / distance : 0;
+    return Math.abs(speed) >= 0.2 ? speed : 0;
+}
+
 /**
  * Translates pointer/wheel gestures into ViewportState + scale changes. A press in
  * the data area pans (`rightOffset`, instant) and — in manual-scale mode — also pans
@@ -198,6 +230,7 @@ export function pinchPinnedRightOffset(anchorLogical: number, barCount: number, 
  * just classifies the gesture and emits intents.
  */
 export class InputController {
+    gestureProfile: 'standard' | 'terminal' = 'standard';
     /** When true (the default), wheel-zoom pins the right edge instead of the bar
      *  under the cursor. */
     rightEdgeZoom = true;
@@ -234,10 +267,23 @@ export class InputController {
     // ── touch state ──
     /** Live touch contacts (local coords) — two entries drive a pinch; extras are ignored. */
     private readonly touches = new Map<number, { x: number; y: number }>();
+    private readonly touchOrigins = new Map<number, DragRegion>();
     private lpTimer: ReturnType<typeof setTimeout> | null = null;
     private pinchStartDist = 1;
     private pinchStartBarSpacing = 0;
     private pinchAnchorLogical = 0;
+    private pinchAnchorX = 0;
+    private pinchPreviousRatio = 1;
+    private pricePinchStarted = false;
+    private terminalPinchPrevented = false;
+    private suspendedPinch: 'pinch' | 'price-pinch' = 'pinch';
+    private wheelLastTime = -Infinity;
+    private wheelTotalX = 0;
+    private wheelTotalY = 0;
+    private terminalPanStage = 0;
+    private terminalPending: PanSample & { y: number } = { x: 0, y: 0, time: 0 };
+    private readonly terminalSamples: PanSample[] = [];
+    private lastTouchTime = -Infinity;
     // Last clean touch tap (for double-tap pairing). Time 0 = no pending first tap.
     private lastTapT = 0;
     private lastTapX = 0;
@@ -310,6 +356,9 @@ export class InputController {
         el.removeEventListener('contextmenu', this.onContextGuard);
         this.cancelLongPress();
         this.touches.clear();
+        this.touchOrigins.clear();
+        this.wheelLastTime = -Infinity;
+        this.wheelTotalX = this.wheelTotalY = 0;
         this.el = null;
     }
 
@@ -368,6 +417,8 @@ export class InputController {
     }
 
     private readonly onDown = (e: PointerEvent): void => {
+        if (e.pointerType === 'touch') this.lastTouchTime = e.timeStamp;
+        else if (this.gestureProfile === 'terminal' && e.timeStamp - this.lastTouchTime < 500) return;
         if (e.button === 1) {
             // Middle-click deletes the drawing under the cursor. The flag lets the
             // mousedown/auxclick companions suppress autoscroll/paste for THIS press only.
@@ -388,22 +439,46 @@ export class InputController {
         if (e.button !== 0) return;
         const { x, y } = this.local(e);
         if (e.pointerType === 'touch') {
+            if (this.gestureProfile === 'terminal' && this.touches.size >= 2 && (this.region === 'pinch' || this.region === 'price-pinch' || this.region === 'pinch-suspended')) {
+                this.touches.set(e.pointerId, { x, y });
+                this.touchOrigins.set(e.pointerId, this.regionAt(x, y));
+                if (this.region !== 'pinch-suspended') this.suspendedPinch = this.region;
+                this.region = 'pinch-suspended';
+                this.capture(e.pointerId);
+                return;
+            }
             // A second finger during a pan (or long-press crosshair) escalates to a
             // pinch; during a claimed drawing/axis gesture — and beyond two contacts —
             // extra fingers are ignored so they can't corrupt the gesture in flight.
-            if (this.touches.size === 1 && this.dragging && (this.region === 'data' || this.region === 'crosshair')) {
+            if (this.touches.size === 1 && this.dragging && (this.region === 'data' || this.region === 'crosshair')
+                && (this.gestureProfile === 'standard' || (this.region === 'data' && !this.terminalPinchPrevented))) {
                 this.touches.set(e.pointerId, { x, y });
+                this.touchOrigins.set(e.pointerId, this.regionAt(x, y));
                 this.beginPinch(e);
                 return;
             }
+            if (this.gestureProfile === 'terminal' && this.touches.size === 1 && this.dragging && !this.terminalPinchPrevented && this.region === 'price' && this.regionAt(x, y) === 'price') {
+                this.touches.set(e.pointerId, { x, y });
+                this.touchOrigins.set(e.pointerId, this.regionAt(x, y));
+                this.cancelLongPress();
+                this.region = 'price-pinch';
+                this.pricePinchStarted = false;
+                this.moved = true;
+                this.capture(e.pointerId);
+                return;
+            }
             if (this.touches.size >= 1) return;
+            this.terminalPinchPrevented = false;
             this.touches.set(e.pointerId, { x, y });
+            this.touchOrigins.set(e.pointerId, this.regionAt(x, y));
         }
         this.deps.drawingsClearTransient?.(); // a finished ruler vanishes on the next press (pan still proceeds)
         this.dragging = true;
         this.moved = false;
         this.startX = x;
         this.startY = y;
+        this.terminalPanStage = 0;
+        this.terminalSamples.length = 0;
         this.prevPressDrawing = this.lastPressDrawing;
         this.lastPressDrawing = false;
         // The drawings layer gets first refusal: when a tool is armed or the press is
@@ -439,7 +514,7 @@ export class InputController {
         this.verticalPan = false;
         if (this.region === 'price') this.deps.beginPriceScale(x, y);
         else if (this.region === 'separator') this.deps.beginPaneResize(y);
-        else if (this.region === 'data') this.verticalPan = this.deps.beginPricePan(y);
+        else if (this.region === 'data' && this.gestureProfile === 'standard') this.verticalPan = this.deps.beginPricePan(y);
         // A stationary touch hold in the plot becomes crosshair inspection — the touch
         // substitute for hovering (a finger can't hover, and a pan would move the view).
         // On an axis strip the same hold opens the host's timezone / price-scale sheet
@@ -469,7 +544,7 @@ export class InputController {
             this.region = 'axis-sheet';
             this.moved = true; // not a click / not a pending drag
             this.deps.onAxisLongPress?.(region, x, y);
-        }, LONG_PRESS_MS);
+        }, this.gestureProfile === 'terminal' ? 333 : LONG_PRESS_MS);
     }
 
     private cancelLongPress(): void {
@@ -488,10 +563,13 @@ export class InputController {
         this.pinchStartDist = Math.max(1, Math.hypot(a.x - b.x, a.y - b.y));
         this.pinchStartBarSpacing = vp.barSpacing;
         this.pinchAnchorLogical = coords.xToLogical((a.x + b.x) / 2);
+        this.pinchAnchorX = (a.x + b.x) / 2;
+        this.pinchPreviousRatio = 1;
         this.region = 'pinch';
         this.dragging = true;
         this.moved = true; // a pinch is never a click
         this.vx = 0;
+        this.terminalSamples.length = 0;
         this.capture(e.pointerId);
     }
 
@@ -501,6 +579,12 @@ export class InputController {
         const pts = [...this.touches.values()];
         if (pts.length < 2) return;
         const [a, b] = pts as [{ x: number; y: number }, { x: number; y: number }];
+        if (this.gestureProfile === 'terminal') {
+            const ratio = Math.hypot(a.x - b.x, a.y - b.y) / this.pinchStartDist;
+            this.deps.zoomTime?.(this.pinchAnchorX, 10 * (ratio - this.pinchPreviousRatio), true);
+            this.pinchPreviousRatio = ratio;
+            return;
+        }
         const barSpacing = pinchBarSpacing(this.pinchStartBarSpacing, this.pinchStartDist, Math.hypot(a.x - b.x, a.y - b.y));
         // The spacing multiplier is constant through the gesture; derive it from the live
         // effective pitch so the pin math matches logicalToX exactly.
@@ -524,10 +608,25 @@ export class InputController {
     }
 
     private readonly onMove = (e: PointerEvent): void => {
+        if (e.pointerType === 'touch' && this.gestureProfile === 'terminal' && !this.touches.has(e.pointerId)) return;
+        if (e.pointerType !== 'touch' && this.gestureProfile === 'terminal' && e.timeStamp - this.lastTouchTime < 500) return;
         const { x, y } = this.local(e);
         this.cursorX = x;
         this.cursorY = y;
         if (e.pointerType === 'touch' && this.touches.has(e.pointerId)) this.touches.set(e.pointerId, { x, y });
+        if (e.pointerType === 'touch' && this.gestureProfile === 'terminal' && this.touches.size === 1) this.terminalPinchPrevented = true;
+        if (this.dragging && this.region === 'pinch-suspended') return;
+        if (this.dragging && this.region === 'price-pinch') {
+            const [a, b] = [...this.touches.values()];
+            if (a && b) {
+                if (this.pricePinchStarted) this.deps.pricePinchTo?.(a.y, b.y);
+                else {
+                    this.deps.beginPricePinch?.(a.x, a.y, b.y);
+                    this.pricePinchStarted = true;
+                }
+            }
+            return;
+        }
         if (this.dragging && this.region === 'pinch') {
             this.applyPinch();
             return; // no crosshair while pinching — two fingers name no single point
@@ -547,6 +646,27 @@ export class InputController {
         // never paired. (The view still pans by those few px either way; `moved` only
         // decides what the RELEASE means.)
         const slop = e.pointerType === 'touch' ? TOUCH_SLOP : DRAG_SLOP;
+        // Drawings and separators own their existing gesture thresholds. Navigation starts
+        // only once the total travel reaches the terminal profile's activation distance.
+        if (this.dragging && this.gestureProfile === 'terminal' && (this.region === 'data' || this.region === 'time' || this.region === 'price')) {
+            if (!this.moved && Math.abs(x - this.startX) + Math.abs(y - this.startY) < 5) return;
+            this.moved = true;
+            this.cancelLongPress();
+            if (this.region === 'data' && this.terminalPanStage < 2) {
+                if (this.terminalPanStage === 0) {
+                    this.terminalPending = { x, y, time: e.timeStamp };
+                    this.terminalPanStage = 1;
+                } else if (x !== this.terminalPending.x || y !== this.terminalPending.y) {
+                    this.startX = x;
+                    this.startY = y;
+                    this.startRightOffset = this.deps.getCoords().getViewport().rightOffset;
+                    this.verticalPan = this.deps.beginPricePan(y);
+                    this.terminalSamples.push({ x, time: this.terminalPending.time });
+                    this.terminalPanStage = 2;
+                }
+                return;
+            }
+        }
         if (this.dragging) {
             if (this.region === 'price') {
                 if (Math.abs(y - this.startY) > slop) this.moved = true;
@@ -558,7 +678,13 @@ export class InputController {
                 if (Math.abs(x - this.startX) > slop) this.moved = true;
                 // Pin the right edge (keep rightOffset): logicalToX(rightEdge) == width for
                 // any barSpacing, so only barSpacing changes. Drag left ⇒ zoom in.
-                const barSpacing = clampBarSpacing(this.startBarSpacing * Math.exp((this.startX - x) * TIME_SCALE_K));
+                const width = this.deps.getCoords().width;
+                const startDistance = Math.max(0, Math.min(width, width - this.startX));
+                const distance = Math.max(0, Math.min(width, width - x));
+                if (this.gestureProfile === 'terminal' && (startDistance === 0 || distance === 0)) return;
+                const barSpacing = this.gestureProfile === 'terminal'
+                    ? this.startBarSpacing * distance / startDistance
+                    : clampBarSpacing(this.startBarSpacing * Math.exp((this.startX - x) * TIME_SCALE_K));
                 this.deps.apply({ barSpacing, rightOffset: this.startRightOffset });
             } else if (this.region === 'drawing') {
                 if (Math.abs(x - this.startX) > slop || Math.abs(y - this.startY) > slop) this.moved = true;
@@ -583,6 +709,7 @@ export class InputController {
                     this.lastX = x;
                     this.lastT = e.timeStamp;
                 }
+                if (this.gestureProfile === 'terminal' && e.pointerType === 'touch') this.samplePan(x, e.timeStamp);
             }
         } else if (this.el) {
             // Cursor affordance: a drawing under the cursor wins (pointer), else the
@@ -601,8 +728,26 @@ export class InputController {
     };
 
     private readonly onUp = (e: PointerEvent): void => {
-        if (e.pointerType === 'touch') this.touches.delete(e.pointerId);
+        if (e.pointerType === 'touch' && this.gestureProfile === 'terminal' && !this.touches.has(e.pointerId)) return;
+        if (e.pointerType === 'touch') this.lastTouchTime = e.timeStamp;
+        else if (this.gestureProfile === 'terminal' && e.timeStamp - this.lastTouchTime < 500) return;
+        if (e.pointerType === 'touch') { this.touches.delete(e.pointerId); this.touchOrigins.delete(e.pointerId); }
         this.cancelLongPress();
+        if (this.dragging && this.region === 'pinch-suspended') {
+            if (this.touches.size === 2) {
+                if (this.suspendedPinch === 'price-pinch') {
+                    if ([...this.touches.keys()].every(id => this.touchOrigins.get(id) === 'price')) {
+                        this.region = 'price-pinch';
+                        this.pricePinchStarted = false;
+                    }
+                } else this.beginPinch(e);
+            } else if (this.touches.size < 2) this.endGesture(e);
+            return;
+        }
+        if (this.dragging && this.region === 'price-pinch') {
+            this.endGesture(e);
+            return;
+        }
         if (this.dragging && this.region === 'pinch') {
             if (this.touches.size === 1) {
                 // One finger lifted: the survivor continues as a plain pan, re-based at
@@ -618,6 +763,9 @@ export class InputController {
                 this.lastX = rest.x;
                 this.lastT = e.timeStamp;
                 this.vx = 0;
+                this.terminalPanStage = 0;
+                this.terminalPinchPrevented = false;
+                this.terminalSamples.length = 0;
                 return; // still dragging with the remaining finger
             }
             this.endGesture(e);
@@ -650,7 +798,10 @@ export class InputController {
             // Only a finger flicks: a mouse release stops dead, so a scrub lands exactly
             // where the pointer let go instead of coasting past it.
             const stale = e.timeStamp - this.lastT > FLING_STALE_MS;
-            if (!stale && Math.abs(this.vx) > FLING_MIN_SPEED) {
+            if (this.gestureProfile === 'terminal') {
+                const speed = terminalPanSpeed(this.terminalSamples, e.timeStamp);
+                if (speed !== 0) this.deps.fling(-speed / this.deps.getCoords().pxPerBar(), Math.log(Math.log(0.997) / -Math.abs(speed)) / Math.log(0.997));
+            } else if (!stale && Math.abs(this.vx) > FLING_MIN_SPEED) {
                 const pitch = this.deps.getCoords().pxPerBar();
                 this.deps.fling(-this.vx / pitch); // rightOffset velocity (logical/ms)
             }
@@ -667,7 +818,10 @@ export class InputController {
     /** Pair clean taps into a double-tap — the touch equivalent of dblclick (same
      *  routing: axis taps reset that axis' view, a plot tap toggles pane maximize). */
     private registerTap(t: number, x: number, y: number): void {
-        const paired = this.lastTapT > 0 && t - this.lastTapT <= DOUBLE_TAP_MS && Math.hypot(x - this.lastTapX, y - this.lastTapY) <= DOUBLE_TAP_SLOP;
+        const terminal = this.gestureProfile === 'terminal';
+        const close = terminal ? Math.abs(x - this.lastTapX) + Math.abs(y - this.lastTapY) < 30
+            : Math.hypot(x - this.lastTapX, y - this.lastTapY) <= DOUBLE_TAP_SLOP;
+        const paired = this.lastTapT > 0 && t - this.lastTapT <= (terminal ? 500 : DOUBLE_TAP_MS) && close;
         if (paired) {
             this.lastTapT = 0; // a triple tap starts a fresh pair, not two doubles
             // Route by the FIRST tap: that one was aimed; the second is the sloppier
@@ -693,7 +847,9 @@ export class InputController {
     /** The browser took the pointer back (system gesture, palm rejection, tab switch):
      *  drop the gesture where it is — no click, no fling, no stuck `dragging`. */
     private readonly onCancel = (e: PointerEvent): void => {
-        if (e.pointerType === 'touch') this.touches.delete(e.pointerId);
+        if (e.pointerType === 'touch' && this.gestureProfile === 'terminal' && !this.touches.has(e.pointerId)) return;
+        if (e.pointerType === 'touch') this.lastTouchTime = e.timeStamp;
+        if (e.pointerType === 'touch') { this.touches.delete(e.pointerId); this.touchOrigins.delete(e.pointerId); }
         this.cancelLongPress();
         if (!this.dragging) return;
         if (this.region === 'drawing' && !Number.isNaN(this.cursorX)) this.deps.drawingsPointerUp?.(this.cursorX, this.cursorY, this.snapMode(e));
@@ -710,6 +866,7 @@ export class InputController {
     };
 
     private readonly onDblClick = (e: MouseEvent): void => {
+        if (this.gestureProfile === 'terminal' && e.timeStamp - this.lastTouchTime < 500) return;
         const { x, y } = this.local(e);
         this.doubleActivate(x, y);
     };
@@ -721,7 +878,10 @@ export class InputController {
         const region = this.regionAt(x, y);
         if (region === 'price') this.deps.resetPriceScale(x, y);
         else if (region === 'separator') this.deps.resetPaneSize(y);
-        else if (region === 'time') this.deps.resetView(); // fit-to-content on the time axis
+        else if (region === 'time') {
+            if (this.gestureProfile === 'terminal') this.deps.resetTimeScale?.();
+            else this.deps.resetView();
+        }
         else if (this.lastPressDrawing || this.prevPressDrawing) return; // drawing interaction, not a pane gesture
         else this.deps.dataDblClick(x, y);
     }
@@ -730,6 +890,10 @@ export class InputController {
         e.preventDefault();
         this.deps.drawingsClearTransient?.(); // a finished ruler vanishes on zoom/pan
         const { x, y } = this.local(e);
+        if (this.gestureProfile === 'terminal') {
+            this.terminalWheel(e, x, y);
+            return;
+        }
         // Over the right price-axis strip the wheel rescales THAT scale, like a slow
         // axis drag: scroll down expands the span (zoom out), scroll up compresses it
         // (zoom in). Each notch is an independent micro-drag (grab, rescale, release),
@@ -756,4 +920,48 @@ export class InputController {
         const target = clampBarSpacing(vp.barSpacing * Math.exp(-e.deltaY * WHEEL_ZOOM_K));
         this.deps.zoomTo(target, anchor.logical, anchor.x);
     };
+
+    private terminalWheel(e: WheelEvent, x: number, y: number): void {
+        const platform = this.el?.ownerDocument?.defaultView?.navigator?.platform ?? '';
+        const mac = /Mac|iPhone|iPad|iPod/i.test(platform);
+        let dx = e.deltaX;
+        let dy = e.deltaY;
+        if (!mac && e.shiftKey) [dx, dy] = [-dy, dx];
+        if (e.timeStamp - this.wheelLastTime > 100) this.wheelTotalX = this.wheelTotalY = 0;
+        this.wheelLastTime = e.timeStamp;
+        this.wheelTotalX += dx;
+        this.wheelTotalY += dy;
+        if (this.wheelTotalX !== 0 && this.wheelTotalY !== 0) {
+            if (Math.abs(this.wheelTotalX) >= 3 * Math.abs(this.wheelTotalY)) dy = 0;
+            if (Math.abs(this.wheelTotalY) >= 3 * Math.abs(this.wheelTotalX)) dx = 0;
+        }
+        const units = (e.deltaMode === 1 ? 32 : e.deltaMode === 2 ? 120 : 1) / 100;
+        dx *= units;
+        dy *= units;
+        if (this.regionAt(x, y) === 'price') {
+            e.stopPropagation?.();
+            if (dy !== 0) {
+                this.deps.beginPriceScale(x, y);
+                this.deps.priceScaleBy(15 * dy);
+            }
+            return;
+        }
+        if (dy !== 0) this.deps.zoomTime?.(x, Math.max(-1, Math.min(1, -dy)), !this.rightEdgeZoom || (mac ? e.metaKey : e.ctrlKey));
+        if (dx !== 0) {
+            const coords = this.deps.getCoords();
+            const vp = coords.getViewport();
+            this.deps.apply({ ...vp, rightOffset: vp.rightOffset + 80 * dx / coords.pxPerBar() });
+        }
+    }
+
+    private samplePan(x: number, time: number): void {
+        const last = this.terminalSamples[this.terminalSamples.length - 1];
+        if (last?.time === time) {
+            last.x = x;
+            return;
+        }
+        if (last && Math.abs(last.x - x) < 15) return;
+        this.terminalSamples.push({ x, time });
+        if (this.terminalSamples.length > 4) this.terminalSamples.shift();
+    }
 }

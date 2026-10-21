@@ -2,6 +2,7 @@ import type { InputSchema, InputValue, SymbolPickerFn } from '../../core/model/i
 import type { LegendActionView, LegendCalloutView } from '../../core/ports/IChartRenderer';
 import type { VelaTheme, MoveTarget } from '../../core/options';
 import { withAlpha } from '../../core/color';
+import { ACCENT } from '../../core/palette';
 import { iconAt } from '../../core/icons';
 import { applyChromeTokens } from './theme-tokens';
 import { attachChromeTooltip } from './chrome-tooltip';
@@ -29,6 +30,56 @@ export {
  *  overlays anchored to the plot's top-left (the widget status line) key on it to shift
  *  the colliding legend below themselves, whichever pane owns the top. */
 export const LEGEND_AT_TOP_ATTR = 'data-vela-pane-at-top';
+export const LEGEND_APPEARANCE_ATTR = 'data-vela-legend-appearance';
+
+const LEGEND_APPEARANCE_CSS = `
+.vela-legend-glyph-terminal { display: none; }
+[${LEGEND_APPEARANCE_ATTR}='terminal'] .vela-legend-glyph-standard { display: none; }
+[${LEGEND_APPEARANCE_ATTR}='terminal'] .vela-legend-glyph-terminal { display: inline-flex; }
+[${LEGEND_APPEARANCE_ATTR}='terminal'] .vela-ind-legend { left: 4px !important; font-size: 13px !important; font-family: -apple-system, BlinkMacSystemFont, 'Trebuchet MS', Roboto, Ubuntu, sans-serif !important; font-feature-settings: 'tnum' on, 'lnum' on; }
+[${LEGEND_APPEARANCE_ATTR}='terminal'] .vela-ind-row {
+    min-height: 24px !important;
+    margin-left: 0 !important;
+    padding: 0 4px !important;
+    max-width: 100% !important;
+    border: 1px solid transparent;
+    border-right: 0;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+}
+[${LEGEND_APPEARANCE_ATTR}='terminal'] .vela-ind-row[data-highlighted='true'] { border-color: var(--vela-border); }
+[${LEGEND_APPEARANCE_ATTR}='terminal'] .vela-ind-row[data-selected='true'] { border-color: ${ACCENT}; }
+[${LEGEND_APPEARANCE_ATTR}='terminal'] .vela-ind-title { min-height: 20px; display: inline-flex; align-items: center; font-weight: 400 !important; }
+[${LEGEND_APPEARANCE_ATTR}='terminal'] .vela-ind-row[data-hidden='true'] { opacity: 1 !important; }
+[${LEGEND_APPEARANCE_ATTR}='terminal'] .vela-ind-row[data-hidden='true'] .vela-ind-title { color: var(--vela-legend-hidden-ink, var(--vela-legend-hidden-ink-default)); }
+[${LEGEND_APPEARANCE_ATTR}='terminal'] .vela-ind-row[data-hidden='true'] .vela-ind-values { display: none !important; }
+[${LEGEND_APPEARANCE_ATTR}='terminal'] .vela-ind-controls { gap: 0 !important; margin-left: 4px !important; }
+[${LEGEND_APPEARANCE_ATTR}='terminal'] .vela-ind-controls button { width: 28px !important; height: 22px !important; border-radius: 0 !important; color: var(--vela-legend-action-ink, var(--vela-legend-action-ink-default)) !important; }
+[${LEGEND_APPEARANCE_ATTR}='terminal'] .vela-ind-controls button svg { width: 18px; height: 18px; }
+[${LEGEND_APPEARANCE_ATTR}='terminal'] .vela-ind-values { margin-left: 4px !important; }
+[${LEGEND_APPEARANCE_ATTR}='terminal'] .vela-ind-values > span { padding-right: 6px; margin-left: 0 !important; }
+[${LEGEND_APPEARANCE_ATTR}='terminal'] .vela-ind-fold {
+    height: 19px;
+    min-width: 27px;
+    padding: 0 5px !important;
+    margin: 3px 0 0 5px !important;
+    gap: 4px !important;
+    border-radius: 3px !important;
+    box-sizing: border-box;
+    color: var(--vela-legend-action-ink, var(--vela-legend-action-ink-default)) !important;
+}
+[${LEGEND_APPEARANCE_ATTR}='terminal'] .vela-ind-fold > span { color: inherit !important; opacity: 1 !important; }
+[${LEGEND_APPEARANCE_ATTR}='terminal'] .vela-ind-fold svg { width: 15px; height: 15px; }
+[data-layout='mobile'] [${LEGEND_APPEARANCE_ATTR}='terminal'] .vela-ind-controls button { width: 44px !important; }
+`;
+
+function ensureLegendAppearanceStyles(doc: Document): void {
+    if (doc.getElementById('vela-legend-appearance')) return;
+    const sheet = doc.createElement('style');
+    sheet.id = 'vela-legend-appearance';
+    sheet.textContent = LEGEND_APPEARANCE_CSS;
+    doc.head.appendChild(sheet);
+}
 
 /** A pane as the legend move UI sees it (id + label + vertical bounds, top-to-bottom order). */
 export interface LegendPaneView {
@@ -139,13 +190,19 @@ const LEGEND_ROW_MIN_H = LEGEND_CTL_PX + LEGEND_ROW_PAD_Y * 2;
 /** Menu ids of the one-step restacking entries (never numeric: the move menu's targets are). */
 const STACK_RAISE = 'stack:raise';
 const STACK_LOWER = 'stack:lower';
-const EYE_SVG = iconAt('eye', LEGEND_ICON_PX);
-const EYE_OFF_SVG = iconAt('eye-off', LEGEND_ICON_PX);
 const GEAR_SVG = iconAt('gear', LEGEND_ICON_PX);
 const CLOSE_SVG = iconAt('close', LEGEND_ICON_PX);
 const FOLD_SVG = iconAt('chevron-up', LEGEND_ICON_PX);
 const UNFOLD_SVG = iconAt('chevron-down', LEGEND_ICON_PX);
 const OVERVIEW_SVG = iconAt('objects', LEGEND_ICON_PX);
+const TERMINAL_EYE_SVG = '<svg viewBox="0 0 18 18" width="18" height="18" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M12 9a3 3 0 1 1-6 0 3 3 0 0 1 6 0Zm-1 0a2 2 0 1 1-4 0 2 2 0 0 1 4 0Z"/><path d="M16.91 8.8C15.31 4.99 12.18 3 9 3 5.82 3 2.7 4.98 1.08 8.8L1 9l.08.2C2.7 13.02 5.82 15 9 15c3.18 0 6.3-1.97 7.91-5.8L17 9l-.09-.2ZM9 14c-2.69 0-5.42-1.63-6.91-5 1.49-3.37 4.22-5 6.9-5 2.7 0 5.43 1.63 6.92 5-1.5 3.37-4.23 5-6.91 5Z"/></svg>';
+const TERMINAL_EYE_OFF_SVG = '<svg viewBox="0 0 18 18" width="18" height="18" fill="currentColor" aria-hidden="true"><path d="M3.7 15 15 3.7l-.7-.7L3 14.3l.7.7ZM9 3c1.09 0 2.17.23 3.19.7l-.77.76C10.64 4.16 9.82 4 9 4 6.31 4 3.58 5.63 2.08 9a9.35 9.35 0 0 0 1.93 2.87l-.7.7A10.44 10.44 0 0 1 1.08 9.2L1 9l.08-.2C2.69 4.99 5.82 3 9 3Z"/><path d="M9 6a3 3 0 0 1 .78.1l-.9.9A2 2 0 0 0 7 8.87l-.9.9A3 3 0 0 1 9 6ZM11.9 8.22l-.9.9A2 2 0 0 1 9.13 11l-.9.9a3 3 0 0 0 3.67-3.68Z"/><path d="M9 14c-.82 0-1.64-.15-2.43-.45l-.76.76c1.02.46 2.1.7 3.19.7 3.18 0 6.31-1.98 7.92-5.81L17 9l-.08-.2a10.44 10.44 0 0 0-2.23-3.37l-.7.7c.75.76 1.41 1.71 1.93 2.87-1.5 3.37-4.23 5-6.92 5Z"/></svg>';
+const TERMINAL_FOLD_SVG = '<svg viewBox="0 0 15 15" width="15" height="15" fill="currentColor" aria-hidden="true"><path d="M3.5 5.58c.24-.28.65-.3.92-.07L7.5 8.14l3.08-2.63a.65.65 0 1 1 .84.98L7.5 9.86 3.58 6.49a.65.65 0 0 1-.07-.91z"/></svg>';
+
+/** Both faces stay mounted so changing the host's appearance never rebuilds row controls. */
+export function legendEyeMarkup(hidden: boolean, standardSize = LEGEND_ICON_PX): string {
+    return `<span class="vela-legend-glyph-standard">${iconAt(hidden ? 'eye-off' : 'eye', standardSize)}</span><span class="vela-legend-glyph-terminal">${hidden ? TERMINAL_EYE_OFF_SVG : TERMINAL_EYE_SVG}</span>`;
+}
 
 /**
  * Display of a legend row's callout-bubble cluster: beside the title while idle,
@@ -248,6 +305,7 @@ export class InputsUI {
         private readonly paneBoundsOf?: (paneId: string) => { top: number; height: number; rightAxis?: number },
     ) {
         if (!container.style.position) container.style.position = 'relative';
+        ensureLegendAppearanceStyles(container.ownerDocument);
         if (typeof document !== 'undefined') document.addEventListener('click', this.onDocClick);
         ensureDialogStyles();
         this.inputsDialog = new IndicatorInputsDialog({
@@ -670,6 +728,7 @@ export class InputsUI {
             // Tag with the pane id so a host app can locate each pane's legend (and thus
             // its on-screen bounds) — e.g. to re-anchor its own per-pane overlays.
             lg.dataset.velaPane = paneId;
+            lg.className = 'vela-ind-legend';
             lg.style.cssText =
                 `position:absolute;left:${LEGEND_LEFT_PX}px;z-index:5;display:flex;flex-direction:column;align-items:flex-start;gap:0;pointer-events:none;font:12px -apple-system,Segoe UI,sans-serif;`;
             // Chart-theme tokens so action-button hovers wash against the plot surface the
@@ -782,7 +841,7 @@ export class InputsUI {
         icon.style.cssText = 'display:inline-flex;align-items:center;line-height:0;opacity:0.7;';
         // The overview override wears the list glyph — the chip opens the host's
         // indicator overview rather than unfolding rows in place.
-        icon.innerHTML = this.overviewAction !== null ? OVERVIEW_SVG : folded ? UNFOLD_SVG : FOLD_SVG;
+        icon.innerHTML = this.overviewAction !== null ? OVERVIEW_SVG : `<span class="vela-legend-glyph-standard">${folded ? UNFOLD_SVG : FOLD_SVG}</span><span class="vela-legend-glyph-terminal" style="transform:rotate(${folded ? 0 : 180}deg)">${TERMINAL_FOLD_SVG}</span>`;
         btn.appendChild(icon);
         if (folded) {
             const label = document.createElement('span');
@@ -817,6 +876,7 @@ export class InputsUI {
         // therefore exist as soon as a legend row does — not only once a dialog has opened.
         ensureDialogStyles();
         const el = document.createElement('div');
+        el.className = 'vela-ind-row';
         // Idle rows are translucent chips sized by their title (status dot and controls are
         // hidden) — enough wash to keep the label legible when candles reach it, without a
         // solid block over the plot. Hovering/selecting fills the chip with the solid chart
@@ -879,6 +939,7 @@ export class InputsUI {
         titleWrap.style.cssText = 'white-space:nowrap;min-width:0;overflow:hidden;text-overflow:ellipsis;';
         titleWrap.addEventListener('mouseenter', () => this.setRowHighlighted(id, true));
         const titleEl = document.createElement('span');
+        titleEl.className = 'vela-ind-title';
         titleEl.textContent = title;
         // Every indicator title reads in the chrome text color: where a study is computed
         // (core vs script) is an implementation detail, not something to color-code.
@@ -901,6 +962,7 @@ export class InputsUI {
         // values arrive (or while the values toggle is off for this row). A zero flex basis
         // takes only the room the title leaves, so a bounded row cuts its values first.
         const valuesEl = document.createElement('span');
+        valuesEl.className = 'vela-ind-values';
         valuesEl.style.cssText =
             `display:none;flex:1 1 0%;min-width:0;overflow:hidden;text-overflow:ellipsis;` +
             `margin-left:${LEGEND_TITLE_VALUES_GAP_PX}px;white-space:nowrap;font-variant-numeric:tabular-nums;`;
@@ -908,6 +970,7 @@ export class InputsUI {
         // Action cluster (eye / gear / move / extras / ✕) — one tight row of equal hit targets.
         // Revealed on hover/selection; a hidden indicator keeps its eye reachable without hover.
         const controlsEl = document.createElement('span');
+        controlsEl.className = 'vela-ind-controls';
         controlsEl.style.cssText =
             `display:none;align-items:center;gap:${LEGEND_ACTION_GAP_PX}px;flex:none;margin-left:${LEGEND_ACTION_GAP_PX}px;`;
         let eyeEl: HTMLButtonElement | null = null;
@@ -916,7 +979,7 @@ export class InputsUI {
             eye.type = 'button';
             eye.setAttribute('aria-label', 'Hide');
             this.tip(this.rowTips, id, eye, () => (this.rows.get(id)?.hidden ? 'Show' : 'Hide'));
-            eye.innerHTML = EYE_SVG;
+            eye.innerHTML = legendEyeMarkup(false);
             eye.className = 'vela-ind-ctl';
             eye.style.cssText = LEGEND_CTL_CSS;
             eye.addEventListener('click', () => {
@@ -1040,9 +1103,10 @@ export class InputsUI {
         const row = this.rows.get(id);
         if (!row) return;
         row.hidden = !visible;
+        row.el.dataset.hidden = String(row.hidden);
         row.el.style.opacity = visible ? '1' : '0.5';
         if (row.eyeEl) {
-            row.eyeEl.innerHTML = visible ? EYE_SVG : EYE_OFF_SVG;
+            row.eyeEl.innerHTML = legendEyeMarkup(!visible);
             row.eyeEl.setAttribute('aria-label', visible ? 'Hide' : 'Show'); // the tooltip reads live state itself
         }
         this.syncRowActions(row);
@@ -1069,6 +1133,8 @@ export class InputsUI {
         const row = this.rows.get(id);
         if (!row) return;
         row.highlighted = highlighted;
+        row.el.dataset.highlighted = String(highlighted);
+        row.el.dataset.selected = String(highlighted && this.selectedId === id);
         this.renderRowValues(row); // values step aside while the controls are out
         row.el.style.boxShadow = highlighted ? `inset 0 0 0 1px ${this.neutralBorder()}` : 'none';
         // The solid fill exists only while the row is open — an idle row is a translucent

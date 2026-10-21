@@ -131,6 +131,9 @@ bar) and the reveal; switching one back on restores the duration configured here
 rich config they are `animations.{zoom, pan, autoscale, intro}` plus
 `priceScale.animateLastPrice`.
 
+The optional terminal gesture profile uses immediate wheel zoom without changing
+these animation preferences. See [Renderer features](./renderer-features.md#interaction).
+
 ### The `settings` option — hiding settings-dialog entries
 
 By default the chart-settings dialog shows everything. `settings.hidden` lists setting

@@ -1,5 +1,11 @@
 <!-- markdownlint-disable no-inline-html first-line-h1 -->
 
+> **Local Replay Studio fork.** This checkout adds a localhost-only trading
+> practice application with saved sessions and configurable challenge rules.
+> Read [LOCAL-APP.md](LOCAL-APP.md), or launch **Start Replay Studio.cmd** on
+> Windows after installing dependencies. The original Vela library and its
+> attribution remain below. This fork is not an official LuxAlgo application.
+
 <div align="center">
 
   <a href="https://velacharts.dev">

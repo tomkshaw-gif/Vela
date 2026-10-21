@@ -10,6 +10,11 @@ import tseslint from 'typescript-eslint';
  *    no new import of it is allowed anywhere — it is being replaced by Vela's own types.
  */
 export default tseslint.config(
+    { ignores: ['dist/**', 'local-app/dist/**', 'local-app/.runtime/**', 'local-app/electron/staging/**', 'local-app/electron/releases/**', '.scratchpad/**', 'node_modules/**'] },
+    {
+        files: ['local-app/**/*.ts'],
+        languageOptions: { parser: tseslint.parser },
+    },
     {
         files: ['src/**/*.ts'],
         languageOptions: {

@@ -151,6 +151,10 @@ export class SceneGraph {
     /** The ACTIVE style's own candle cosmetics (`chartTypes.<id>.candle*`) when it is a
      *  candle-based plugin type; null ⇒ paint with the shared `style.candle` block. */
     candleOverride: CandlePaintOverride | null = null;
+    /** Runtime geometry policy; cosmetic templates keep their own colors and visibility. */
+    candleRasterization: 'standard' | 'terminal' = 'standard';
+    /** Runtime scale-label layout and divider geometry, independent of saved cosmetics. */
+    axisRendering: 'standard' | 'terminal' = 'standard';
     /** Explicit baseline reference price for `priceStyle:'baseline'`; when null the
      *  baseline follows `style.baseline.baselineLevel` as a percent of the visible pane
      *  range (resolved per frame via `baselinePriceFor`). */
