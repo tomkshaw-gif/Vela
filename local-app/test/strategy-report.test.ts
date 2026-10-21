@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { StrategyState, StrategyTrade } from '../../src/index';
 import { aggregatePeriods, analyzeStrategy, observedEquityPhases, strategyMetricsCsv, strategyTradesCsv, type StrategyResultsSnapshot } from '../shared/strategy-analysis';
 import { mountStrategyResults, type StrategyResultsController } from '../client/strategy-results';
+import { keyboardAction, replayShortcutTargetIsEditing } from '../client/util';
 
 const start = Date.parse('2024-01-01T00:00:00Z');
 const state: StrategyState = { position: 0, avgPrice: 0, equity: 1050, openPnl: 0, netPnl: 50, grossProfit: 90, grossLoss: 40, wins: 1, losses: 1, even: 0, maxDrawdown: 999, maxRunup: 100, initialCapital: 1000 };
@@ -81,6 +82,97 @@ describe('report ledger calculations', () => {
 });
 
 describe('compact strategy report', () => {
+    const rightArrow = { key: 'ArrowRight', code: 'ArrowRight', ctrlKey: false, metaKey: false, altKey: false };
+    const replayAction = () => keyboardAction(rightArrow, replayShortcutTargetIsEditing(document.activeElement));
+
+    it('keeps the focused calculation disclosure and replay shortcut scope through a live report update', () => {
+        const { host, viewer } = mounted(snapshot([trade(0, 1)], { warnings: ['Synthetic warning'] }));
+        const notes = host.querySelector<HTMLDetailsElement>('.sr-calculation-notes')!;
+        notes.open = true;
+        notes.querySelector<HTMLElement>('summary')!.focus(); expect(replayAction()).toBeNull();
+        viewer.update(snapshot([trade(0, 2)], { warnings: ['Updated synthetic warning'] }));
+        expect(document.activeElement).toBe(host.querySelector('.sr-calculation-notes > summary'));
+        expect(host.querySelector<HTMLDetailsElement>('.sr-calculation-notes')!.open).toBe(true);
+        expect(replayAction()).toBeNull();
+    });
+
+    it('falls back to a report tab when the focused control disappears, without enabling replay shortcuts', () => {
+        const { host, viewer } = mounted(snapshot([trade(0, 1)]));
+        click(host, '[data-tab="simulation"]');
+        host.querySelector<HTMLElement>('.sr-simulation-form [name="runs"]')!.focus();
+        click(host, '[data-tab="trades"]');
+        expect(host.contains(document.activeElement)).toBe(true);
+        expect(replayAction()).toBeNull();
+        viewer.update(snapshot([trade(0, 2)])); expect(replayAction()).toBeNull();
+    });
+
+    it('keeps focus inside the report when a live update removes the calculation disclosure', () => {
+        const { host, viewer } = mounted(snapshot([trade(0, 1)]));
+        host.querySelector<HTMLElement>('.sr-calculation-notes > summary')!.focus();
+        viewer.update(snapshot([trade(0, 2)], { equity: [{ time: start, value: 1000 }, { time: start + 600_000, value: 1002 }] }));
+        expect(host.querySelector('.sr-calculation-notes')).toBeNull();
+        expect(host.contains(document.activeElement)).toBe(true); expect(document.activeElement?.matches('[role="tab"]')).toBe(true);
+        expect(replayAction()).toBeNull();
+    });
+
+    it('preserves live search selection, toolbar focus, and focus/selection outside the report', () => {
+        const { host, viewer } = mounted(snapshot([trade(0, 1)]));
+        click(host, '[data-tab="trades"]');
+        const search = host.querySelector<HTMLInputElement>('[data-control="query"]')!;
+        search.value = 'trade'; search.dispatchEvent(new Event('input', { bubbles: true }));
+        search.focus(); search.setSelectionRange(1, 4, 'backward');
+        viewer.update(snapshot([trade(0, 2)]));
+        const replacement = host.querySelector<HTMLInputElement>('[data-control="query"]')!;
+        expect(document.activeElement).toBe(replacement); expect(replacement.value).toBe('trade');
+        expect([replacement.selectionStart, replacement.selectionEnd, replacement.selectionDirection]).toEqual([1, 4, 'backward']);
+        const more = host.querySelector<HTMLElement>('.sr-more > summary')!; more.focus();
+        viewer.update(snapshot([trade(0, 3)])); expect(document.activeElement).toBe(more); expect(replayAction()).toBeNull();
+        const outside = document.createElement('input'); document.body.append(outside);
+        outside.value = 'outside'; outside.focus(); outside.setSelectionRange(2, 5, 'backward');
+        viewer.update(snapshot([trade(0, 4)]));
+        expect(document.activeElement).toBe(outside);
+        expect([outside.selectionStart, outside.selectionEnd, outside.selectionDirection]).toEqual([2, 5, 'backward']);
+    });
+
+    it('keeps focus on curve, sort, page-size and calendar controls after replacement', () => {
+        const { host, viewer } = mounted(snapshot(Array.from({ length: 80 }, (_, i) => trade(i, 1))));
+        const focusChange = (name: string, value: string) => {
+            host.querySelector<HTMLElement>(`[data-control="${name}"]`)!.focus(); change(host, name, value);
+            expect(document.activeElement).toBe(host.querySelector(`[data-control="${name}"]`));
+        };
+        focusChange('curve-mode', 'drawdown'); focusChange('curve-unit', 'percent');
+        click(host, '[data-tab="trades"]');
+        host.querySelector<HTMLElement>('[data-sort="pnl"]')!.focus(); click(host, '[data-sort="pnl"]');
+        expect(document.activeElement).toBe(host.querySelector('[data-sort="pnl"]'));
+        host.querySelector<HTMLElement>('[data-action="page-next"]')!.focus(); click(host, '[data-action="page-next"]');
+        expect(document.activeElement).toBe(host.querySelector('[data-action="page-next"]'));
+        focusChange('page-size', '50');
+        focusChange('view', 'calendar'); focusChange('month', '2024-02');
+        host.querySelector<HTMLElement>('[data-action="month-prev"]')!.focus(); click(host, '[data-action="month-prev"]');
+        expect(document.activeElement).toBe(host.querySelector('[data-action="month-prev"]'));
+        viewer.update(snapshot([trade(0, 1)]));
+        expect(host.contains(document.activeElement)).toBe(true);
+    });
+    it('retains keyboard scope when pagination disables the focused control or a day opens the list', () => {
+        const { host } = mounted(snapshot(Array.from({ length: 26 }, (_, i) => trade(i, 1))));
+        click(host, '[data-tab="trades"]');
+        host.querySelector<HTMLElement>('[data-action="page-next"]')!.focus(); click(host, '[data-action="page-next"]');
+        expect(host.contains(document.activeElement)).toBe(true); expect(document.activeElement).not.toBe(document.body);
+        change(host, 'view', 'calendar');
+        const day = host.querySelector<HTMLButtonElement>('[data-day]:not(:disabled)')!; day.focus(); day.click();
+        expect(host.contains(document.activeElement)).toBe(true); expect(document.activeElement).not.toBe(document.body);
+    });
+    it('discloses curve basis, UTC endpoints and sampling of the supplied history', () => {
+        const equity = Array.from({ length: 1000 }, (_, index) => ({ time: start + index * 1000, value: 1000 + index }));
+        const { host } = mounted(snapshot([], { equity }));
+        expect(host.querySelector('.sr-curve-coverage')!.textContent).toContain('1,000 supplied observations');
+        expect(host.querySelector('.sr-curve-coverage')!.textContent).toContain('extrema sample');
+        expect(host.querySelector('.sr-curve-coverage')!.textContent).toContain('2024-01-01 00:16:39 UTC');
+        change(host, 'curve-unit', 'percent');
+        expect(host.querySelector('.sr-curve-basis')!.textContent).toContain('Equity change from initial capital / initial capital');
+        change(host, 'curve-mode', 'drawdown');
+        expect(host.querySelector('.sr-curve-basis')!.textContent).toContain('Drawdown from observed peak / initial capital');
+    });
     it('offers two primary views, four ordered KPIs and one dominant, clearly labeled curve', () => {
         const { host } = mounted(snapshot([trade(0, 50)]));
         expect([...host.querySelectorAll('[role="tab"]')].map(button => button.textContent)).toEqual(['Report', 'List of trades']);

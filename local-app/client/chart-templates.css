@@ -17,7 +17,15 @@
 .template-message[data-error='true'] { color:#f23645; }
 .template-list { display:flex; flex-direction:column; gap:10px; }
 .template-card { border:1px solid var(--vela-border); border-radius:4px; padding:12px; }
-.template-card header { display:flex; flex-direction:column; gap:5px; margin-bottom:6px; overflow-wrap:anywhere; }
+.template-card header { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:5px 8px; margin-bottom:6px; overflow-wrap:anywhere; }
+.template-card header > span { grid-row:2; }
+.template-card .template-favorite { grid-column:2; grid-row:1 / 3; align-self:start; min-width:32px; font-size:18px; line-height:1; }
+.template-favorite[aria-pressed='true'] { color:var(--vela-accent); }
+.template-quick h3 { margin:0 0 7px; color:var(--vela-fg-muted); font-size:11px; font-weight:500; }
+.template-quick > div { display:flex; flex-wrap:wrap; gap:6px; max-height:180px; overflow-y:auto; padding:2px; }
+.template-quick button { display:flex; flex-direction:column; align-items:flex-start; gap:4px; min-width:0; max-width:100%; text-align:left; }
+.template-quick button > span { max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.template-quick small { color:var(--vela-fg-muted); font-size:10px; }
 .template-card strong { font-size:13px; font-weight:500; }
 .template-card :is(header > span,small) { color:var(--vela-fg-muted); font-size:10px; }
 .template-card-actions,.template-rename { margin-top:12px; }

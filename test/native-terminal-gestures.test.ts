@@ -2,18 +2,25 @@ import { describe, expect, it, vi } from 'vitest';
 import { InputController, terminalPanSpeed, type InputControllerDeps } from '../src/renderers/native/core/InputController';
 import { CoordinateSystem } from '../src/renderers/native/core/CoordinateSystem';
 import { NativeRenderer } from '../src/renderers/native/NativeRenderer';
+import type { ViewportState } from '../src/renderers/native/core/ViewportState';
 
-function harness(platform = 'Win32', profile: 'standard' | 'terminal' = 'terminal') {
-    const coords = new CoordinateSystem();
-    coords.setSize(800, 200, 1);
-    coords.setBars(Array.from({ length: 200 }, (_, i) => i * 1000));
-    coords.setViewport({ barSpacing: 10, rightOffset: 6 });
+function harness(platform = 'Win32', profile: 'standard' | 'terminal' = 'terminal', native?: {
+    coords: CoordinateSystem;
+    applyViewport(vp: ViewportState): void;
+    zoomTime(x: number, step: number, forceCursor: boolean): void;
+}) {
+    const coords = native?.coords ?? new CoordinateSystem();
+    if (!native) {
+        coords.setSize(800, 200, 1);
+        coords.setBars(Array.from({ length: 200 }, (_, i) => i * 1000));
+        coords.setViewport({ barSpacing: 10, rightOffset: 6 });
+    }
     const listeners = new Map<string, (e: unknown) => void>();
     const deps = {
         getCoords: () => coords,
-        apply: vi.fn((vp) => coords.setViewport(vp)),
+        apply: vi.fn((vp: ViewportState) => native ? native.applyViewport(vp) : coords.setViewport(vp)),
         zoomTo: vi.fn(),
-        zoomTime: vi.fn(),
+        zoomTime: vi.fn((x: number, step: number, forceCursor: boolean) => native?.zoomTime(x, step, forceCursor)),
         fling: vi.fn(),
         onPointerMove: vi.fn(), onClick: vi.fn(),
         beginPriceScale: vi.fn(), priceScaleBy: vi.fn(),
@@ -267,17 +274,28 @@ describe('terminal pointer gestures', () => {
 function renderer() {
     const r = new NativeRenderer();
     const state = r as any;
+    r.applyFeature('gestureProfile', 'terminal');
     state.coords.setSize(800, 200, 1);
     state.coords.setBars(Array.from({ length: 200 }, (_, i) => i * 1000));
     state.coords.setViewport({ barSpacing: 10, rightOffset: 6.3 });
     state.animator = { stop: vi.fn(), start: vi.fn() };
     state.scheduler = { invalidate: vi.fn() };
     state.emitViewportChange = vi.fn();
-    r.applyFeature('gestureProfile', 'terminal');
     return { r, state };
 }
 
 describe('terminal renderer authority', () => {
+    it('routes cursor wheel zoom and horizontal wheel pan through the native half-bar coordinates', () => {
+        const { state } = renderer();
+        const h = harness('Win32', 'terminal', state);
+        h.wheel({ clientX: 350, deltaY: -100, ctrlKey: true });
+        expect(state.coords.getViewport().rightOffset).toBeCloseTo(2.409090909090909);
+        expect(state.coords.logicalToX(161)).toBeCloseTo(350);
+        h.wheel({ clientX: 350, deltaX: 25, timeStamp: 1200 });
+        expect(state.coords.logicalToX(161)).toBeCloseTo(330); // terminal horizontal wheel normalization is 0.8
+        h.input.detach();
+    });
+
     it('defaults to standard and supports an opt-in profile without changing animation preferences', () => {
         const r = new NativeRenderer();
         expect(r.features).toContain('gestureProfile');
@@ -301,7 +319,7 @@ describe('terminal renderer authority', () => {
         expect(state.coords.logicalToX(leftAnchor)).toBeCloseTo(1);
     });
 
-    it('rescales price by its pane-local grab ratio and pans inverted manual scales over H-1', () => {
+    it('rescales price by its pane-local grab ratio and pans inverted manual scales over the projected height', () => {
         const { state } = renderer();
         const pane = state.scene.ensurePane('price', 'price', 0);
         pane.bounds = { top: 0, height: 200 };
@@ -313,7 +331,7 @@ describe('terminal renderer authority', () => {
         pane.scale = { min: 100, max: 200, invert: true };
         pane.manualScale = { ...pane.scale };
         expect(state.beginPricePan(100)).toBe(true);
-        state.pricePanBy(19.9);
+        state.pricePanBy(20);
         expect(pane.manualScale.min).toBeCloseTo(90);
         expect(pane.manualScale.max).toBeCloseTo(190);
     });

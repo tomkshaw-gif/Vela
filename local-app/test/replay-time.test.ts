@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { nextSessionTime, parseWallTime, REPLAY_ZONES, wallTimeInput } from '../client/replay-time';
+import { nextSessionTime, parseWallTime, REPLAY_ZONES, wallTimeInput, wallTimeOccurrences } from '../client/replay-time';
 
 const epoch = (value: string): number => Date.parse(value);
 
@@ -32,9 +32,32 @@ describe('replay wall time', () => {
         expect(parseWallTime('2024-03-31T02:00', 'Europe/London')).toBe(epoch('2024-03-31T01:00:00Z'));
     });
 
-    it('chooses the earlier UTC occurrence of ambiguous fall-back times', () => {
-        expect(parseWallTime('2024-11-03T01:30', 'America/New_York')).toBe(epoch('2024-11-03T05:30:00Z'));
-        expect(parseWallTime('2024-10-27T01:30', 'Europe/London')).toBe(epoch('2024-10-27T00:30:00Z'));
+    it('requires an explicit occurrence for repeated fall-back times in both zones', () => {
+        for (const [value, zone, earlier, later] of [
+            ['2026-11-01T01:15', 'America/New_York', '2026-11-01T05:15:00Z', '2026-11-01T06:15:00Z'],
+            ['2026-10-25T01:15', 'Europe/London', '2026-10-25T00:15:00Z', '2026-10-25T01:15:00Z'],
+        ]) {
+            expect(() => parseWallTime(value!, zone!)).toThrow(/occurrence|offset/);
+            expect(parseWallTime(value!, zone!, { occurrence: 'earlier' })).toBe(epoch(earlier!));
+            expect(parseWallTime(value!, zone!, { occurrence: 'later' })).toBe(epoch(later!));
+        }
+    });
+
+    it('exposes real offset choices and preserves the later instant through zone formatting', () => {
+        const value = '2026-11-01T01:15';
+        expect(wallTimeOccurrences(value, 'America/New_York')).toEqual([
+            { time: epoch('2026-11-01T05:15:00Z'), offsetMinutes: -240, label: 'UTC-04:00' },
+            { time: epoch('2026-11-01T06:15:00Z'), offsetMinutes: -300, label: 'UTC-05:00' },
+        ]);
+        const selected = parseWallTime(value, 'America/New_York', { offsetMinutes: -300 });
+        expect(selected).toBeGreaterThan(epoch('2026-11-01T06:10:00Z'));
+        expect(parseWallTime(wallTimeInput(selected, 'UTC'), 'UTC')).toBe(selected);
+        expect(parseWallTime(wallTimeInput(selected, 'America/New_York'), 'America/New_York', { offsetMinutes: -300 })).toBe(selected);
+        expect(() => parseWallTime(value, 'America/New_York', { offsetMinutes: 60 })).toThrow(/offset/);
+        expect(() => parseWallTime(value, 'America/New_York', { occurrence: 'earlier', offsetMinutes: -300 })).toThrow(/offset|occurrence/);
+        expect(wallTimeOccurrences('2026-03-08T02:15', 'America/New_York')).toEqual([]);
+        expect(() => parseWallTime('2026-03-08T02:15', 'America/New_York', { occurrence: 'later' })).toThrow(/does not exist/);
+        expect(wallTimeOccurrences('2026-01-01T01:15', 'UTC')).toEqual([{ time: epoch('2026-01-01T01:15:00Z'), offsetMinutes: 0, label: 'UTC+00:00' }]);
     });
 
     it('uses the different US and UK transition dates without leaking offsets between zones', () => {
@@ -49,10 +72,18 @@ describe('replay wall time', () => {
         expect(() => wallTimeInput(NaN, 'UTC')).toThrow(RangeError);
         expect(() => wallTimeInput(Infinity, 'UTC')).toThrow(RangeError);
         expect(() => parseWallTime('2024-01-01T12:00', 'Invalid/Zone')).toThrow(RangeError);
+        expect(() => wallTimeOccurrences('2024-01-01T12:00', 'Invalid/Zone')).toThrow(RangeError);
+        expect(() => parseWallTime('2024-01-01T12:00', 'UTC', { offsetMinutes: NaN })).toThrow(/offset/);
+        expect(() => parseWallTime('2024-01-01T12:00', 'UTC', { occurrence: 'automatic' as 'earlier' })).toThrow(/occurrence/);
+        expect(() => parseWallTime('2026-07-01T01:15', 'America/New_York', { offsetMinutes: -300 })).toThrow(/offset/);
     });
 });
 
 describe('replay time shortcuts', () => {
+    it('requires manual occurrence selection when next-day reaches a repeated hour', () => {
+        expect(() => nextSessionTime(epoch('2026-10-31T05:15:00Z'), 'next-day', 'America/New_York')).toThrow(/offset|occurrence/);
+        expect(() => nextSessionTime(epoch('2026-10-24T00:15:00Z'), 'next-day', 'Europe/London')).toThrow(/offset|occurrence/);
+    });
     it('uses today only if the London opening is still strictly ahead', () => {
         expect(nextSessionTime(epoch('2024-04-08T06:59:59Z'), 'london', 'UTC')).toEqual({
             time: epoch('2024-04-08T07:00:00Z'), zone: 'Europe/London', label: 'London 08:00' });

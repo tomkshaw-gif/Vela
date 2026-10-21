@@ -39,6 +39,10 @@ for (const name of ['@luxalgo/vela-pinets', 'pinets', 'electron-updater']) {
         try { notices.push(await readFile(join(folder, file), 'utf8')); } catch (error) { if (error.code !== 'ENOENT') throw error; }
     }
 }
+for (const [family, file] of [['Nunito Sans', 'NunitoSans-OFL.txt'], ['Lato', 'Lato-OFL.txt']]) {
+    notices.push(`\n${family} (SIL Open Font License 1.1)`,
+        await readFile(join(root, 'local-app/client/fonts', file), 'utf8'));
+}
 await writeFile(join(app, 'THIRD-PARTY-NOTICES.txt'), notices.join('\n\n') + '\n');
 await buildIcon(join(stage, 'icons'));
 console.log(`Desktop ${version} staged with Electron ${pkg.devDependencies.electron}.`);

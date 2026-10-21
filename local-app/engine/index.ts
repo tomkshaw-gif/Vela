@@ -319,13 +319,14 @@ function appendEquity(s: Session, time: number): void {
     if (s.equityCurve.length > LIMITS.curve) s.equityCurve = s.equityCurve.filter((_, i) => i % 2 === 0 || i === s.equityCurve.length - 1);
 }
 function advance(s: Session, bars: Bar[], end: number): void {
+    const endIndex = s.config.endIndex ?? bars.length;
     for (let index = s.cursor + 1; index <= end && s.status === 'paused'; index++) {
         const bar = bars[index]!;
         validateBar(bar, s.instrument);
         if (index > 0 && bars[index - 1]!.time >= bar.time) throw new Error('Source bars must have strictly increasing times');
         s.cursor = index;
         processBar(s, bar);
-        if (index === bars.length - 1 && s.status === 'paused') {
+        if (index === endIndex - 1 && s.status === 'paused') {
             cancelWorking(s); flatten(s, bar.close, bar.time, 'End of data'); mark(s, bar.close);
             const reason = riskReason(s);
             if (reason) fail(s, bar.close, bar.time, reason);
@@ -370,17 +371,18 @@ export function applyCommand(input: Session, bars: Bar[], rawCommand: Command): 
     if (s.status !== 'paused' && !['bookmark', 'layout', 'rename'].includes(type)) throw new Error('This attempt is finished; create a new attempt to trade again');
     const time = s.cursor >= 0 ? bars[s.cursor]!.time : bars[0]!.time - 1;
     const reference = s.cursor >= 0 ? bars[s.cursor]!.close : undefined;
+    const endIndex = s.config.endIndex ?? bars.length;
     const command = rawCommand;
     switch (command.type) {
         case 'advance': {
             const count = integer(command.count, 'Advance count', 1, 5000);
-            advance(s, bars, Math.min(bars.length - 1, s.cursor + count)); break;
+            advance(s, bars, Math.min(endIndex - 1, s.cursor + count)); break;
         }
         case 'advanceTo': {
             const target = integer(command.time, 'Target time', 0, 8640000000000000);
             if (target <= time) throw new Error('Go-to must move forward; create a separate attempt to start over');
             let end = s.cursor;
-            while (end + 1 < bars.length && bars[end + 1]!.time <= target && end - s.cursor < 5000) end++;
+            while (end + 1 < endIndex && end - s.cursor < 5000 && bars[end + 1]!.time <= target) end++;
             if (end === s.cursor) throw new Error('Target does not include a new source bar');
             advance(s, bars, end); break;
         }

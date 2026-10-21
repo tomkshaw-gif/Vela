@@ -9,6 +9,7 @@ import type { SceneGraph, PaneNode } from '../core/SceneGraph';
 import { candleTier, wickWidth, candleGeometry, snapY, aggregateCandleColumns, terminalCandleGeometry, rasterizeTerminalCandles, type TerminalCandle } from './candle-lod';
 import { BASELINE_TOP_LINE, BASELINE_BOTTOM_LINE, BASELINE_FILL_ALPHA, BASELINE_FILL_ALPHA_FAR, withAlpha as cssWithAlpha, effectiveCandlePaint } from '../core/chartConfig';
 import type { IRenderBackend } from './IRenderBackend';
+import { BarColorCache } from './BarColorCache';
 import { Batch, type RGBA } from './gl/Batch';
 import { parseColor } from './gl/color';
 
@@ -113,6 +114,7 @@ export class WebGL2Backend implements IRenderBackend {
     glow = 0;
 
     private canvas: HTMLCanvasElement | null = null;
+    private readonly barColorCache = new BarColorCache();
     private gl: WebGL2RenderingContext | null = null;
     private program: WebGLProgram | null = null;
     private vao: WebGLVertexArrayObject | null = null;
@@ -340,7 +342,7 @@ export class WebGL2Backend implements IRenderBackend {
         gl.enable(gl.BLEND);
         gl.enable(gl.SCISSOR_TEST);
 
-        const barColorMap = mergeBarColors(scene.indicators);
+        const barColorMap = this.barColorCache.get(scene.indicators, scene.barColorsRevision);
         const panes = scene.orderedPanes();
         const liveSlices = new Set<HTMLCanvasElement>();
         for (const pane of panes) {
@@ -592,6 +594,7 @@ export class WebGL2Backend implements IRenderBackend {
     }
 
     destroy(): void {
+        this.barColorCache.clear();
         const gl = this.gl;
         if (this.canvas) {
             this.canvas.removeEventListener('webglcontextlost', this.onLost);
@@ -1192,22 +1195,4 @@ function fadeAlpha(c: RGBA, t: number): RGBA {
 function findPoints(model: IndicatorModel, seriesId: string): LineLikeSeries['points'] | null {
     const s = model.series.find((x) => x.id === seriesId);
     return s && isLineLikeSeries(s) ? s.points : null;
-}
-
-const EMPTY_BARCOLORS: ReadonlyMap<number, string> = new Map();
-
-function mergeBarColors(indicators: Map<string, IndicatorModel>): ReadonlyMap<number, string> {
-    let any = false;
-    for (const m of indicators.values()) {
-        if (m.barColors && m.barColors.length > 0) {
-            any = true;
-            break;
-        }
-    }
-    if (!any) return EMPTY_BARCOLORS;
-    const map = new Map<number, string>();
-    for (const m of indicators.values()) {
-        if (m.barColors) for (const bc of m.barColors) map.set(bc.time, bc.color);
-    }
-    return map;
 }

@@ -5,6 +5,9 @@ export const REPLAY_ZONES = [
 ] as const;
 
 export type JumpPreset = 'london' | 'new-york' | 'next-day';
+/** offsetMinutes is local time minus UTC; label includes historical offset seconds when needed. */
+export interface WallTimeOccurrence { time: number; offsetMinutes: number; label: string }
+export interface WallTimeParseOptions { occurrence?: 'earlier' | 'later'; offsetMinutes?: number }
 
 interface WallTime { year: number; month: number; day: number; hour: number; minute: number; second: number }
 
@@ -68,16 +71,15 @@ function readInput(value: string): WallTime {
     return result;
 }
 
-function resolve(value: WallTime, zone: string): number | null {
+function occurrences(value: WallTime, zone: string): number[] {
     const wall = utcTime(value);
-    if (zone === 'UTC') return wall;
+    if (zone === 'UTC') return [wall];
     // Sampling both sides of the date captures both offsets at a clock change.
     const offsets = new Set([-2, -1, 0, 1, 2].map((shift) => {
         const time = wall + shift * day;
         return utcTime(parts(time, zone)) - time;
     }));
-    const matches = [...offsets].map((offset) => wall - offset).filter((time) => same(value, parts(time, zone)));
-    return matches.length ? Math.min(...matches) : null;
+    return [...offsets].map((offset) => wall - offset).filter((time) => same(value, parts(time, zone))).sort((a, b) => a - b);
 }
 
 /** Formats UTC epoch milliseconds for a datetime-local input, to second precision. */
@@ -85,11 +87,28 @@ export function wallTimeInput(time: number, zone: string): string {
     return input(parts(time, zone));
 }
 
-/** Rejects missing DST wall times; repeated fall-back times use the earlier occurrence. */
-export function parseWallTime(value: string, zone: string): number {
-    const result = resolve(readInput(value), zone);
-    if (result === null) throw new RangeError('That local time does not exist because the clocks move forward. Choose a later time.');
-    return result;
+/** Empty for a spring gap; repeated times expose both real UTC offsets in time order. */
+export function wallTimeOccurrences(value: string, zone: string): WallTimeOccurrence[] {
+    const wall = readInput(value);
+    return occurrences(wall, zone).map(time => {
+        const offsetMinutes = (utcTime(wall) - time) / minute;
+        const seconds = Math.round(Math.abs(offsetMinutes) * 60);
+        const pad = (value: number): string => String(value).padStart(2, '0');
+        const label = `UTC${offsetMinutes < 0 ? '-' : '+'}${pad(Math.floor(seconds / 3600))}:${pad(Math.floor(seconds / 60) % 60)}${seconds % 60 ? `:${pad(seconds % 60)}` : ''}`;
+        return { time, offsetMinutes, label };
+    });
+}
+
+/** Manual entry never silently selects one occurrence of a repeated wall time. */
+export function parseWallTime(value: string, zone: string, options: WallTimeParseOptions = {}): number {
+    const matches = wallTimeOccurrences(value, zone);
+    if (!matches.length) throw new RangeError('That local time does not exist because the clocks move forward. Choose a later time.');
+    if (options.occurrence !== undefined && options.occurrence !== 'earlier' && options.occurrence !== 'later') throw new RangeError('Choose the earlier or later occurrence.');
+    const occurrence = options.occurrence === undefined ? undefined : options.occurrence === 'earlier' ? matches[0] : matches.at(-1);
+    const offset = options.offsetMinutes === undefined ? undefined : matches.find(match => match.offsetMinutes === options.offsetMinutes);
+    if (options.offsetMinutes !== undefined && !offset || occurrence && offset && occurrence !== offset) throw new RangeError('Choose an offset that matches the selected local time and occurrence.');
+    if (matches.length > 1 && !occurrence && !offset) throw new RangeError('That local time occurs twice. Choose an explicit UTC offset or occurrence.');
+    return (offset ?? occurrence ?? matches[0]!).time;
 }
 
 /** Presets are weekday time conventions, not exchange holiday calendars. */
@@ -102,8 +121,10 @@ export function nextSessionTime(after: number, preset: JumpPreset, zone: string)
         // The same wall time may be skipped in spring. Use the first valid minute after it.
         for (let index = 0; index <= 180; index++) {
             const candidate = index ? utcParts(utcTime({ ...target, second: 0 }) + index * minute) : target;
-            const time = resolve(candidate, targetZone);
-            if (time !== null && time > after) return { time, zone: targetZone, label: 'Next day' };
+            const matches = occurrences(candidate, targetZone);
+            if (matches.length > 1) throw new RangeError('Next day occurs twice. Enter that date and choose an explicit UTC offset or occurrence.');
+            const time = matches[0];
+            if (time !== undefined && time > after) return { time, zone: targetZone, label: 'Next day' };
         }
     } else {
         const opening = { ...current, hour: preset === 'london' ? 8 : 9, minute: preset === 'london' ? 0 : 30, second: 0 };
@@ -111,8 +132,8 @@ export function nextSessionTime(after: number, preset: JumpPreset, zone: string)
             const candidate = utcParts(utcTime(opening) + index * day);
             const weekday = new Date(utcTime(candidate)).getUTCDay();
             if (weekday === 0 || weekday === 6) continue;
-            const time = resolve(candidate, targetZone);
-            if (time !== null && time > after) return { time, zone: targetZone, label: preset === 'london' ? 'London 08:00' : 'New York 09:30' };
+            const time = occurrences(candidate, targetZone)[0];
+            if (time !== undefined && time > after) return { time, zone: targetZone, label: preset === 'london' ? 'London 08:00' : 'New York 09:30' };
         }
     }
     throw new RangeError('No later replay time is available for that date.');

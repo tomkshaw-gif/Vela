@@ -304,6 +304,8 @@ export class Vela {
      * deep backfill continues behind it — await {@link historyComplete}); a call
      * superseded by a newer `setMarket` resolves silently. Emits `market:changed`
      * (with the previous identity) when the market identity changed.
+     * For a same-market offline snapshot, pass `data` with `preserveView: true` to
+     * keep fractional time framing and manual price scales while consumers rerun.
      */
     setMarket(next: MarketSwitch): Promise<void> {
         return this.orchestrator.setMarket(next);

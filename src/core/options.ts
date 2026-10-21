@@ -57,6 +57,11 @@ export interface MarketSwitch {
     /** Switch the shown trading session (reloads like a timeframe change). */
     session?: MarketSession;
     data?: OHLCV[];
+    /** Replace the current offline series without reframing time or resetting manual
+     *  price scales. Requires `data` and an unchanged symbol, timeframe and session.
+     *  The newest bars follow only if the view is not parked in history. Indicators
+     *  and chart-type engines re-execute over exactly the supplied snapshot. */
+    preserveView?: boolean;
     visibleRange?: VisibleRangePreset | VisibleRange;
 }
 

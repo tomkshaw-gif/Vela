@@ -1,5 +1,5 @@
 import type { ViewportState } from './ViewportState';
-import { defaultViewport } from './ViewportState';
+import { defaultViewport, rightOffsetPhase, type RightOffsetConvention } from './ViewportState';
 import { barTimeToLogical, logicalToBarTime, medianInterval } from './bar-time';
 
 /** A pane's price window (after autoscale + margins). `log` ⇒ logarithmic mapping;
@@ -34,6 +34,7 @@ export class CoordinateSystem {
     private dataHeightPx = 0;
     private devicePixelRatio = 1;
     private viewport: ViewportState = defaultViewport();
+    private offsetConvention: RightOffsetConvention = 'bar-center';
     private pitchScale = 1;
     private times: number[] = [];
     private intervalMs = 0;
@@ -71,6 +72,18 @@ export class CoordinateSystem {
 
     getViewport(): ViewportState {
         return this.viewport;
+    }
+
+    setRightOffsetConvention(convention: RightOffsetConvention): void {
+        this.offsetConvention = convention;
+    }
+
+    get rightOffsetConvention(): RightOffsetConvention {
+        return this.offsetConvention;
+    }
+
+    get rightOffsetPhase(): number {
+        return rightOffsetPhase(this.offsetConvention);
     }
 
     /**
@@ -125,7 +138,7 @@ export class CoordinateSystem {
 
     /** The logical index that sits exactly at the right pixel edge of the chart. */
     get rightEdgeLogical(): number {
-        return this.barCount - 1 + this.viewport.rightOffset;
+        return this.barCount - 1 + this.viewport.rightOffset + this.rightOffsetPhase;
     }
 
     // ── X axis: logical bar index ↔ pixel (via the effective pitch = zoom × spacing multiplier) ──
@@ -135,6 +148,12 @@ export class CoordinateSystem {
 
     xToLogical(x: number): number {
         return this.rightEdgeLogical - (this.widthPx - x) / this.pxPerBar();
+    }
+
+    /** Viewport offset that places a logical position at x at the requested zoom. */
+    rightOffsetForLogical(logical: number, x = this.widthPx, barSpacing = this.viewport.barSpacing): number {
+        return logical + (this.widthPx - x) / (barSpacing * this.pitchScale)
+            - (this.barCount - 1) - this.rightOffsetPhase;
     }
 
     // ── bar time ↔ logical ↔ pixel ──

@@ -52,7 +52,7 @@ import { Animator, EaseSetting, easeToward } from './core/Animator';
 import { InputController } from './core/InputController';
 import { KeyboardController } from './core/KeyboardController';
 import { SceneGraph, paneLogScale, paneScaleMode, paneInvert, type PaneNode, type HighlightArea, type SessionZones, type ScaleMode } from './core/SceneGraph';
-import { clampBarSpacing, defaultViewport, MIN_BAR_SPACING, MAX_BAR_SPACING, type ViewportState } from './core/ViewportState';
+import { clampBarSpacing, defaultViewport, rightOffsetPhase, MIN_BAR_SPACING, MAX_BAR_SPACING, type ViewportState, type RightOffsetConvention } from './core/ViewportState';
 import { Canvas2dBackend } from './backend/Canvas2dBackend';
 import type { IRenderBackend } from './backend/IRenderBackend';
 import { ChromeRenderer } from './chrome/ChromeRenderer';
@@ -378,6 +378,8 @@ export class NativeRenderer implements IChartRenderer {
     private readonly themeSelectCbs = new Set<(theme: ThemeName) => void>();
     /** First-run config snapshot — what "Reset defaults" restores. */
     private factoryConfig: ChartConfig | null = null;
+    // Imported margins keep their declared units even if the profile is enabled later.
+    private rightMarginConvention: RightOffsetConvention | null = null;
     private hostSettingsSections: HostSettingsSection[] = [];
     private readonly clickCbs = new Set<(e: ClickEvent) => void>();
     private readonly axisLongPressCbs = new Set<(e: AxisLongPressEvent) => void>();
@@ -478,10 +480,19 @@ export class NativeRenderer implements IChartRenderer {
                 this.zoomAnchorMode = value === 'right' ? 'right' : 'cursor';
                 if (this.input) this.input.rightEdgeZoom = this.zoomAnchorMode === 'right';
                 return; // affects the next wheel-zoom only — nothing to repaint
-            case 'gestureProfile':
+            case 'gestureProfile': {
+                const oldPhase = this.coords.rightOffsetPhase;
                 this.gestureProfile = value === 'terminal' ? 'terminal' : 'standard';
+                this.coords.setRightOffsetConvention(this.gestureProfile === 'terminal' ? 'bar-edge' : 'bar-center');
+                const shift = oldPhase - this.coords.rightOffsetPhase;
+                if (shift !== 0) {
+                    const vp = this.coords.getViewport();
+                    this.coords.setViewport({ ...vp, rightOffset: vp.rightOffset + shift });
+                    if (this.scrollTargetRO !== null) this.scrollTargetRO += shift;
+                }
                 if (this.input) this.input.gestureProfile = this.gestureProfile;
                 return;
+            }
             case 'candleRasterization':
                 this.scene.candleRasterization = value === 'terminal' ? 'terminal' : 'standard';
                 break;
@@ -830,7 +841,7 @@ export class NativeRenderer implements IChartRenderer {
                 shortColor: this.scene.tradeMarkers.colors.short,
                 exitColor: this.scene.tradeMarkers.colors.exit,
             },
-            timeScale: { timezone: this.scene.timezone },
+            timeScale: { timezone: this.scene.timezone, rightOffsetConvention: this.rightMarginConvention ?? this.coords.rightOffsetConvention },
             marks: { visible: this.scene.marks.visible, groups: { ...this.scene.marks.groups } },
             candles: {
                 upColor: this.candleUp,
@@ -893,6 +904,12 @@ export class NativeRenderer implements IChartRenderer {
     applyConfig(config: unknown): void {
         const next = mergeConfig(this.getConfig(), config);
         const s = this.scene.style;
+        const previousRightMargin = this.configuredRightOffset();
+        const patch = config as { margins?: { right?: unknown }; timeScale?: { rightOffsetConvention?: unknown } } | null;
+        if ((typeof patch?.margins?.right === 'number' && Number.isFinite(patch.margins.right))
+            || patch?.timeScale?.rightOffsetConvention === 'bar-center' || patch?.timeScale?.rightOffsetConvention === 'bar-edge') {
+            this.rightMarginConvention = next.timeScale.rightOffsetConvention;
+        }
         const previousAxisFontSize = s.fontSize;
         // Chart-type SDK settings: on change, store + push the type's `<id>-settings`
         // channel (its renderer layer reads it) + notify the core (its data engine).
@@ -966,8 +983,9 @@ export class NativeRenderer implements IChartRenderer {
         // margins — top/bottom flow into the next autoscale pass; a right-margin edit
         // re-lands the newest bar on the new whitespace at the current zoom, so it shows
         // immediately instead of on the next fit.
-        if (next.margins.right !== s.margins.right && this.coords.barCount > 0) {
-            this.applyViewport({ barSpacing: this.coords.getViewport().barSpacing, rightOffset: next.margins.right });
+        const rightMargin = this.configuredRightOffset(next.margins.right);
+        if (rightMargin !== previousRightMargin && this.coords.barCount > 0) {
+            this.applyViewport({ barSpacing: this.coords.getViewport().barSpacing, rightOffset: rightMargin });
         }
         s.margins = { ...next.margins };
         // trade markers
@@ -1176,7 +1194,7 @@ export class NativeRenderer implements IChartRenderer {
         const doc = factoryResetConfig(factory, this.scene.priceStyle);
         const groups = { ...doc.marks.groups };
         for (const g of this.markGroupsInUse()) groups[g.id] = g.visible !== false;
-        return { ...doc, marks: { ...doc.marks, groups } };
+        return { ...doc, timeScale: { ...doc.timeScale, rightOffsetConvention: this.coords.rightOffsetConvention }, marks: { ...doc.marks, groups } };
     }
 
     /** Close the in-chart dialogs (indicator settings + chart-settings gear). No-op when none are open. */
@@ -1266,7 +1284,7 @@ export class NativeRenderer implements IChartRenderer {
     private updateScrollToRealtimeButton(): void {
         const btn = this.scrollButton;
         if (!btn) return;
-        const latestOffScreen = this.coords.barCount > 0 && this.coords.getViewport().rightOffset < 0;
+        const latestOffScreen = this.latestBarOffScreen();
         if (this.layoutMode === 'mobile') {
             btn.style.display = latestOffScreen ? 'flex' : 'none';
             return;
@@ -1277,7 +1295,7 @@ export class NativeRenderer implements IChartRenderer {
     /** Glide the view back to the most recent bars, keeping the current zoom (barSpacing). */
     private scrollToRealtime(): void {
         if (this.coords.barCount === 0) return;
-        this.glideRightOffset(this.scene.style.margins.right);
+        this.glideRightOffset(this.configuredRightOffset());
     }
 
     /** Ease rightOffset to `target` at constant zoom (see animTick's scroll glide);
@@ -1973,9 +1991,19 @@ export class NativeRenderer implements IChartRenderer {
         this.liveEaseTime = 0;
         const prevBars = this.bars;
         const prevHeadTime = prevBars[0]?.time;
+        const previousViewport = this.coords.getViewport();
+        const previousRightEdge = this.coords.rightEdgeLogical;
+        const wasHistorical = this.latestBarOffScreen();
+        const heldRightTime = opts?.preserveView && prevBars.length > 0 && this.latestBarOffScreen() && this.scrollTargetRO === null
+            ? this.coords.logicalToTime(this.coords.rightEdgeLogical) : null;
         this.bars = normalizeBars(bars);
         this.scene.bars = this.bars;
         this.coords.setBars(this.bars.map((b) => b.time));
+        if (opts?.preserveView && this.bars.length > 0) {
+            const rightOffset = heldRightTime !== null
+                ? this.coords.rightOffsetForLogical(this.coords.timeToLogical(heldRightTime)) : previousViewport.rightOffset;
+            this.coords.setViewport({ ...previousViewport, rightOffset: this.clampViewport(previousViewport.barSpacing, rightOffset).rightOffset });
+        }
         // The bar array's head may have moved (a history-backfill prepend) — re-derive
         // every mounted model's anchor offset against the new indices.
         for (const model of this.scene.indicators.values()) this.refreshAnchorOffset(model);
@@ -1984,25 +2012,40 @@ export class NativeRenderer implements IChartRenderer {
         // mid-zoom would otherwise re-anchor thousands of bars into the past and teleport the
         // viewport (the "view jumps to the middle of history" bug). Same series only: on a
         // symbol/timeframe switch the head time won't match and the view re-fits anyway.
+        let lostMotionAnchor = opts?.preserveView === true && this.bars.length === 0;
         if (opts?.preserveView === true && prevHeadTime != null && this.bars.length > 0) {
             // The head can move BOTH ways on the same series: a backfill PREPENDS older bars
             // (indices shift up), a shallower depth TRIMS from the front (indices shift down).
-            // Only the prepend used to be handled, so a trim left the anchors pointing past
-            // the data. The newest end is fixed either way, so the viewport itself never moves.
+            // A historical view keeps its time anchor; a following view carries the zoom
+            // anchor with the newest edge so the next animation frame cannot undo the follow.
             const newHeadTime = this.bars[0]!.time;
             let shift = 0;
+            let overlapping = newHeadTime === prevHeadTime;
             if (newHeadTime !== prevHeadTime) {
                 const prepended = this.bars.findIndex((b) => b.time === prevHeadTime);
-                if (prepended > 0) shift = prepended;
+                if (prepended > 0) { shift = prepended; overlapping = true; }
                 else {
                     const trimmed = prevBars.findIndex((b) => b.time === newHeadTime);
-                    if (trimmed > 0) shift = -trimmed;
+                    if (trimmed > 0) { shift = -trimmed; overlapping = true; }
                 }
             }
+            const nextAnchor = this.zoomAnchorLogical + (heldRightTime !== null ? shift : this.bars.length - prevBars.length);
+            const zooming = this.targetBarSpacing !== previousViewport.barSpacing;
+            const retained = (logical: number): boolean => logical >= 0 && logical <= this.bars.length - 1;
+            lostMotionAnchor = !overlapping || (wasHistorical &&
+                (!retained(previousRightEdge + shift) || (zooming && !retained(nextAnchor))));
+            if (overlapping) this.zoomAnchorLogical = nextAnchor;
             if (shift !== 0) {
-                this.zoomAnchorLogical += shift;
                 if (this.hoverLogical != null) this.hoverLogical += shift;
             }
+        }
+        if (lostMotionAnchor) {
+            // The replacement already preserved or clamped the view. An old logical
+            // anchor or pan target must not override that decision on the next frame.
+            this.targetBarSpacing = this.coords.getViewport().barSpacing;
+            this.panVelocity = 0;
+            this.scrollTargetRO = null;
+            this.terminalPanRemainingMs = null;
         }
         // Full bar replacement re-frames the view — a symbol/timeframe switch must not
         // keep a PAN aimed at another market's time range. The ZOOM is a user
@@ -2044,7 +2087,7 @@ export class NativeRenderer implements IChartRenderer {
             // back): the user is reading history — hold the view on the same bars instead of
             // sliding it along with every new one.
             const vp = this.coords.getViewport();
-            const holdView = n > 0 && vp.rightOffset < 0 && this.scrollTargetRO === null;
+            const holdView = n > 0 && this.latestBarOffScreen() && this.scrollTargetRO === null;
             this.bars.push(bar);
             this.syncLiveEase(bar); // a fresh bar — snap (never ease across bars)
             // Warm path: O(1) append (no full times remap / median re-sort). Cold start
@@ -2248,6 +2291,7 @@ export class NativeRenderer implements IChartRenderer {
 
     mountIndicator(model: IndicatorModel): IndicatorRenderHandle {
         this.scene.indicators.set(model.id, model);
+        this.scene.barColorsRevision += 1;
         this.refreshAnchorOffset(model);
         // Default z = mount order (later ⇒ in front) — except a native that paints through
         // an SDK layer: its canvas stacks ABOVE the data canvas by default, so its key must
@@ -2291,6 +2335,7 @@ export class NativeRenderer implements IChartRenderer {
             }
         }
         applyPatch(model, patch);
+        if (model.barColors?.length) this.scene.barColorsRevision += 1;
         this.scheduler.invalidate(InvalidateLevel.Light);
     }
 
@@ -2305,7 +2350,7 @@ export class NativeRenderer implements IChartRenderer {
             this.vpvrHidden = false;
             this.scene.vpvrLayer = null;
         }
-        this.scene.indicators.delete(handle.id);
+        if (this.scene.indicators.delete(handle.id)) this.scene.barColorsRevision += 1;
         this.dropInstanceLayer(handle.id);
         this.scene.forgetIndicatorZ(handle.id);
         this.scene.forgetAnchorOffset(handle.id);
@@ -2530,8 +2575,8 @@ export class NativeRenderer implements IChartRenderer {
         const fromL = this.coords.timeToLogical(range.from);
         const toL = this.coords.timeToLogical(range.to);
         const span = Math.max(1e-6, toL - fromL);
-        const barSpacing = clampBarSpacing(this.coords.width / (span * this.coords.spacingScale));
-        const rightOffset = toL - (this.coords.barCount - 1);
+        const barSpacing = this.coords.width / (span * this.coords.spacingScale);
+        const rightOffset = this.coords.rightOffsetForLogical(toL);
         this.applyViewport({ barSpacing, rightOffset });
     }
 
@@ -2549,6 +2594,14 @@ export class NativeRenderer implements IChartRenderer {
     }
 
     // ── internals ──
+    private configuredRightOffset(margin = this.scene.style.margins.right): number {
+        return margin + rightOffsetPhase(this.rightMarginConvention ?? this.coords.rightOffsetConvention) - this.coords.rightOffsetPhase;
+    }
+
+    private latestBarOffScreen(): boolean {
+        return this.coords.barCount > 0 && this.coords.getViewport().rightOffset < -this.coords.rightOffsetPhase;
+    }
+
     /** Instant viewport set (drag, freeze-on-touch, setVisibleRange) — stops any animation. */
     private applyViewport(vp: ViewportState): void {
         this.animator.stop();
@@ -2591,7 +2644,7 @@ export class NativeRenderer implements IChartRenderer {
         const vp = this.coords.getViewport();
         const barSpacing = this.clampViewport(vp.barSpacing * (1 + step / 10), vp.rightOffset).barSpacing;
         const rightOffset = forceCursor || this.zoomAnchorMode === 'cursor'
-            ? logical + (width - cursorX) / (barSpacing * this.coords.spacingScale) - (this.coords.barCount - 1)
+            ? this.coords.rightOffsetForLogical(logical, cursorX, barSpacing)
             : vp.rightOffset;
         this.applyViewport({ barSpacing, rightOffset });
     }
@@ -2608,39 +2661,44 @@ export class NativeRenderer implements IChartRenderer {
     private anchoredRightOffset(barSpacing: number): number {
         // Pinning a pixel while zooming is a px→bar conversion, so it uses the EFFECTIVE pitch
         // (zoom × spacing multiplier) — otherwise the anchor drifts when the multiplier ≠ 1.
-        const pitch = barSpacing * this.coords.spacingScale;
-        return this.zoomAnchorLogical + (this.coords.width - this.zoomAnchorX) / pitch - (this.coords.barCount - 1);
+        return this.coords.rightOffsetForLogical(this.zoomAnchorLogical, this.zoomAnchorX, barSpacing);
     }
 
-    /**
-     * Bound the viewport so the user can't zoom/pan into a useless state:
-     *  - zoom OUT no further than "all bars + a small margin fill the width" (no thin strip
-     *    of compressed candles floating in whitespace);
-     *  - zoom IN no further than keeping ≥ {@link MIN_VISIBLE_BARS} candles on screen;
-     *  - pan no further than a bounded right whitespace / the same minimum visible.
-     * Applied at every viewport write (drag, wheel, fling, time-axis drag, keyboard).
-     */
+    /** Terminal zoom uses plot width; the standard profile retains its legacy limits.
+     *  Replacements and standard animation steps omit the fit-all floor. */
+    private clampSpacing(barSpacing: number, fitAll = true): number {
+        const n = this.coords.barCount;
+        const W = this.coords.width;
+        const scale = this.coords.spacingScale;
+        if (this.gestureProfile === 'terminal' && W > 0) {
+            return Math.max(MIN_BAR_SPACING, Math.min(W / (MIN_VISIBLE_BARS * scale), barSpacing));
+        }
+        if (!fitAll || n <= 1 || W <= 0) return clampBarSpacing(barSpacing);
+        const maxBs = Math.min(MAX_BAR_SPACING, W / (Math.min(MIN_VISIBLE_BARS, n) * scale));
+        const minBs = Math.max(MIN_BAR_SPACING, Math.min(maxBs, W / ((n + ZOOM_OUT_MARGIN_BARS) * scale)));
+        return Math.max(minBs, Math.min(maxBs, barSpacing));
+    }
+
+    /** Bound pan to the minimum visible bar count and zoom to the profile's limits. */
     private clampViewport(barSpacing: number, rightOffset: number): ViewportState {
         const n = this.coords.barCount;
         const W = this.coords.width;
-        if (n === 0 || (n === 1 && this.gestureProfile === 'standard') || W <= 0) return { barSpacing: clampBarSpacing(barSpacing), rightOffset };
+        const bs = this.clampSpacing(barSpacing);
+        if (n === 0 || (n === 1 && this.gestureProfile === 'standard') || W <= 0) return { barSpacing: bs, rightOffset };
         const minVisible = this.gestureProfile === 'terminal' ? MIN_VISIBLE_BARS : Math.min(MIN_VISIBLE_BARS, n);
         // Bars-on-screen depends on the EFFECTIVE pitch (barSpacing × spacing multiplier), so fold
         // the multiplier into these bar-count limits — else a >1 multiplier would let the user zoom
         // in past minVisible, or zoom out to a thin strip that no longer fills the width.
         const scale = this.coords.spacingScale;
-        // bar spacing: max keeps ≥ minVisible bars on screen; min keeps all bars + a margin within the width.
-        const maxBs = this.gestureProfile === 'terminal' ? W / (minVisible * scale)
-            : Math.min(MAX_BAR_SPACING, W / (minVisible * scale));
-        const minBs = this.gestureProfile === 'terminal' ? MIN_BAR_SPACING
-            : Math.max(MIN_BAR_SPACING, Math.min(maxBs, W / ((n + ZOOM_OUT_MARGIN_BARS) * scale)));
-        const bs = Math.max(minBs, Math.min(maxBs, barSpacing));
         // right offset: the ONLY pan limit is keeping ≥ minVisible candles on screen. Panning left
         // can push the data far left (lots of right whitespace) until just minVisible remain; panning
         // right can scroll into the oldest bars until just minVisible remain at the right edge.
         const visBars = W / (bs * scale);
-        const maxRo = visBars - (this.gestureProfile === 'terminal' ? minVisible : minVisible - 1);
-        const minRo = minVisible - n; // slide right until exactly minVisible candles remain at the right edge
+        // Legacy margins also retain their pixel pan limits until an explicit reset;
+        // translating only the margin would move a clamped view by half a bar.
+        const offsetShift = this.gestureProfile === 'terminal' ? this.configuredRightOffset(0) : 0;
+        const maxRo = visBars - (this.gestureProfile === 'terminal' ? minVisible : minVisible - 1) + offsetShift;
+        const minRo = minVisible - n + offsetShift; // slide right until exactly minVisible candles remain at the right edge
         const ro = Math.max(minRo, Math.min(maxRo, rightOffset));
         return { barSpacing: bs, rightOffset: ro };
     }
@@ -2652,9 +2710,10 @@ export class NativeRenderer implements IChartRenderer {
         let rightOffset = vp.rightOffset;
         let active = false;
 
+        if (this.gestureProfile === 'terminal') this.targetBarSpacing = this.clampSpacing(this.targetBarSpacing, false);
         const tbs = this.targetBarSpacing;
         if (Math.abs(barSpacing - tbs) > tbs * 1e-3) {
-            barSpacing = clampBarSpacing(easeToward(barSpacing, tbs, dtMs, this.animZoom.tau));
+            barSpacing = this.clampSpacing(easeToward(barSpacing, tbs, dtMs, this.animZoom.tau), false);
             rightOffset = this.anchoredRightOffset(barSpacing);
             active = true;
         } else if (barSpacing !== tbs) {
@@ -3011,7 +3070,7 @@ export class NativeRenderer implements IChartRenderer {
         const start = this.scaleDragStart;
         if (!holder || !start) return;
         const terminal = this.gestureProfile === 'terminal';
-        this.setManualScale(holder, shiftScale(start, dyTotal, terminal ? this.scaleDragHeight - 1 : this.scaleDragHeight, terminal && Boolean(start.invert)));
+        this.setManualScale(holder, shiftScale(start, dyTotal, this.scaleDragHeight, terminal && Boolean(start.invert)));
     }
 
     private beginPricePinch(x: number, y1: number, y2: number): void {
@@ -3074,13 +3133,19 @@ export class NativeRenderer implements IChartRenderer {
 
     /** Re-fit the view and drop every manual scale (keyboard `0`). */
     private resetView(): void {
+        const conventionChanged = this.rightMarginConvention !== null && this.rightMarginConvention !== this.coords.rightOffsetConvention;
+        this.rightMarginConvention = this.coords.rightOffsetConvention;
         this.fitContent(); // clears all manual scales
         this.scheduler.invalidate(InvalidateLevel.Full);
         this.emitViewportChange();
+        if (conventionChanged) for (const cb of this.configChangedCbs) cb();
     }
 
     private resetTimeScale(): void {
+        const conventionChanged = this.rightMarginConvention !== null && this.rightMarginConvention !== this.coords.rightOffsetConvention;
+        this.rightMarginConvention = this.coords.rightOffsetConvention;
         this.applyViewport({ barSpacing: 6, rightOffset: this.scene.style.margins.right });
+        if (conventionChanged) for (const cb of this.configChangedCbs) cb();
     }
 
     private setManualScale(holder: ScaleHolder, scale: PriceScale): void {
@@ -3257,7 +3322,7 @@ export class NativeRenderer implements IChartRenderer {
     /** Zoom one keyboard notch, right-edge anchored (+1 in, -1 out). */
     private zoomByStep(direction: 1 | -1): void {
         const vp = this.coords.getViewport();
-        const target = clampBarSpacing(vp.barSpacing * Math.exp(direction * KEY_ZOOM_STEP));
+        const target = vp.barSpacing * Math.exp(direction * KEY_ZOOM_STEP);
         this.zoomTo(target, this.coords.rightEdgeLogical, this.coords.width);
     }
 
@@ -3416,9 +3481,10 @@ export class NativeRenderer implements IChartRenderer {
         // (cheap) so it stays aligned after a pan/zoom/value change.
         // While a gesture animates, the Animator's loop owns the frame (it paints L0+L1
         // + crosshair every tick and picks up live data/scale changes), so a concurrent
-        // Scheduler invalidation (live tick, hover) must NOT also paint — else both run
-        // each frame. The animTick will reflect the change on its next frame.
-        if (this.animator.active) return;
+        // Scheduler data invalidations must NOT also paint — else both loops run
+        // each frame. Cursor-only frames use the current painted axes without waiting
+        // for the animation to settle.
+        if (this.animator.active && level !== InvalidateLevel.Cursor) return;
         if (repaintsData(level)) {
             this.computeScales();
             this.paintData();
@@ -3886,8 +3952,8 @@ export class NativeRenderer implements IChartRenderer {
         for (const pane of this.scene.panes.values()) pane.manualScale = null; // re-fit ⇒ autoscale resumes
         for (const sl of this.scene.indicatorScales.values()) sl.manualScale = null;
         const visibleBars = Math.min(n, 200);
-        const rightOffset = this.scene.style.margins.right;
-        const v = this.clampViewport(w / ((visibleBars + rightOffset) * this.coords.spacingScale), rightOffset);
+        const rightOffset = this.configuredRightOffset();
+        const v = this.clampViewport(w / ((visibleBars + this.scene.style.margins.right) * this.coords.spacingScale), rightOffset);
         this.coords.setViewport(v);
         this.targetBarSpacing = v.barSpacing;
     }
@@ -3902,7 +3968,7 @@ export class NativeRenderer implements IChartRenderer {
         this.panVelocity = 0;
         for (const pane of this.scene.panes.values()) pane.manualScale = null; // re-frame ⇒ autoscale resumes
         for (const sl of this.scene.indicatorScales.values()) sl.manualScale = null;
-        const v: ViewportState = { barSpacing: clampBarSpacing(this.coords.getViewport().barSpacing), rightOffset: this.scene.style.margins.right };
+        const v: ViewportState = { barSpacing: this.clampSpacing(this.coords.getViewport().barSpacing, false), rightOffset: this.configuredRightOffset() };
         this.coords.setViewport(v);
         this.targetBarSpacing = v.barSpacing;
     }

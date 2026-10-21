@@ -100,6 +100,15 @@ describe('mergeConfig — validating reducer (item 15)', () => {
         expect(mergeConfig(base, { version: 999 }).version).toBe(CHART_CONFIG_VERSION);
     });
 
+    it('migrates legacy margin units and validates explicit units independently of the profile', () => {
+        const base = baseConfig();
+        base.timeScale.rightOffsetConvention = 'bar-edge';
+        expect(mergeConfig(base, { version: 1, margins: { right: 10 } }).timeScale.rightOffsetConvention).toBe('bar-center');
+        expect(mergeConfig(base, { version: 1, layout: { fontSize: 12 } }).timeScale.rightOffsetConvention).toBe('bar-edge');
+        expect(mergeConfig(base, { timeScale: { rightOffsetConvention: 'unknown' } }).timeScale.rightOffsetConvention).toBe('bar-edge');
+        expect(mergeConfig(base, { version: 2, timeScale: { rightOffsetConvention: 'bar-center' }, margins: { right: 10 } }).timeScale.rightOffsetConvention).toBe('bar-center');
+    });
+
     it('merges stacking additively — named ids apply, unnamed ones keep their keys', () => {
         const base = baseConfig();
         base.stacking = { candles: 0, series: { 'ind-1': -1, 'ind-2': -2 } };
@@ -135,7 +144,7 @@ describe('NativeRenderer.getConfig — defaults resolve to concrete values', () 
         expect(cfg.crosshair).toEqual({ color: '#9aa0ad', width: 1, style: 'dashed', opacity: 0.4, labelBackground: '#595959' });
         expect(cfg.priceScale).toEqual({ mode: 'price', log: false, invert: false, borderColor: '#2a2b30', labelsVisible: true, currentPriceLine: true, priceLabel: true, countdown: true, animateLastPrice: false });
         expect(cfg.panes).toEqual({ separatorColor: '#2a2b30' }); // inherits the theme border
-        expect(cfg.timeScale).toEqual({ timezone: 'UTC' });
+        expect(cfg.timeScale).toEqual({ timezone: 'UTC', rightOffsetConvention: 'bar-center' });
         expect(cfg.candles.upColor).toBe('#089981');
         expect(cfg.candles.downColor).toBe('#f23645');
         expect(cfg.candles.borderUpColor).toBe('#089981'); // inherits the body color

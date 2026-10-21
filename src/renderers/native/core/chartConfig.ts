@@ -5,6 +5,7 @@ import { ACCENT, BEARISH, BULLISH, CHIP_PLATE, CROSSHAIR, SERIES_LINE, WARNING }
 import type { PriceStyle } from '../../../core/options';
 import type { ScaleMode } from './SceneGraph';
 import { backgroundGradient, type BackgroundGradient } from './background';
+import type { RightOffsetConvention } from './ViewportState';
 
 /**
  * Comprehensive, **serializable** native-renderer style/config (item 15).
@@ -22,7 +23,7 @@ import { backgroundGradient, type BackgroundGradient } from './background';
  * partial config onto a known-good base, dropping any malformed field. This keeps
  * `applyConfig(json)` total — it never throws on bad input and never half-applies.
  */
-export const CHART_CONFIG_VERSION = 1;
+export const CHART_CONFIG_VERSION = 2;
 
 /**
  * Baseline style defaults — the baseline chart type owns its palette and does NOT
@@ -283,6 +284,9 @@ export interface ChartConfig {
     };
     timeScale: {
         timezone: string;
+        /** Units of `margins.right`, independent of the active gesture profile.
+         *  Version 1 documents use `bar-center`; new terminal charts use `bar-edge`. */
+        rightOffsetConvention: RightOffsetConvention;
     };
     /** Timeline marks (the `marks` feature): the lane's master toggle + per-group visibility
      *  (the Events tab's checkboxes). `groups` merges additively, like `stacking.series`. */
@@ -729,6 +733,9 @@ export function mergeConfig(base: ChartConfig, patch: unknown): ChartConfig {
         },
         timeScale: {
             timezone: typeof ts.timezone === 'string' && ts.timezone ? ts.timezone : base.timeScale.timezone,
+            rightOffsetConvention: ts.rightOffsetConvention === 'bar-center' || ts.rightOffsetConvention === 'bar-edge'
+                ? ts.rightOffsetConvention
+                : p.version === 1 && isNum(margins.right) ? 'bar-center' : base.timeScale.rightOffsetConvention,
         },
         marks: {
             visible: isBool(marks.visible) ? marks.visible : base.marks.visible,

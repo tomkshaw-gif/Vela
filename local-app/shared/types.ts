@@ -28,10 +28,15 @@ export const DEFAULT_RULES: PropRules = {
 export interface SessionConfig {
     name: string; datasetId: string; mode: 'practice' | 'prop'; initialBalance: number;
     commissionPerContractSide: number; slippageTicks: number; spreadTicks: number;
-    startIndex: number; rules: PropRules;
+    startIndex: number;
+    /** Exclusive source index; absent means the full cached dataset. */
+    endIndex?: number; rules: PropRules;
 }
-/** Calendar starts are resolved to a source index before a session is persisted. */
-export type SessionCreateConfig = (SessionConfig & { startTime?: never }) | (Omit<SessionConfig, 'startIndex'> & { startTime: number; startIndex?: never });
+/** Calendar bounds are resolved to source indices before a session is persisted. End times are exclusive. */
+export type SessionCreateConfig = (
+    (Omit<SessionConfig, 'endIndex'> & { startTime?: never }) |
+    (Omit<SessionConfig, 'startIndex' | 'endIndex'> & { startTime: number; startIndex?: never })
+) & ({ endIndex?: number; endTime?: never } | { endTime: number; endIndex?: never });
 export interface SessionNavigation {
     currentIndex: number; currentTime: number | null; targetIndex: number; targetTime: number;
 }
@@ -94,6 +99,8 @@ export interface SessionSummary {
     id: string; name: string; datasetId: string; symbol: string; mode: 'practice' | 'prop';
     status: Session['status']; cursor: number; barCount: number; equity: number;
     netPnl: number; trades: number; updatedAt: string; revision: number;
+    /** Effective selected range; barCount remains the full dataset count. Older saved summaries may omit these. */
+    startIndex?: number; endIndex?: number; startTime?: number; endTime?: number;
 }
 export interface SessionView { session: Session; dataset: DatasetMeta }
 export interface ChartView {

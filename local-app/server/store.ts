@@ -7,8 +7,10 @@ import type { TimeframeDescriptor } from '../shared/timeframes';
 import { nextTimeframeBucket, timeframeBucket } from '../shared/timeframes';
 import { checksum, instrumentFor, interval, MAX_BARS, validateBars } from './data';
 import { AppError, text } from './errors';
+import { integer, validateSessionConfig } from '../engine/validation';
 
 type DatasetInput = { name: string; symbol: string; schema: Schema; source: DatasetMeta['source']; bars: Bar[]; scope?: string };
+type SourceBoundary = { idx: number; time: number };
 const MAX_SESSIONS = 1000;
 const MAX_DATASETS = 200;
 const MAX_TOTAL_BARS = 5_000_000;
@@ -89,8 +91,25 @@ export class ReplayStore {
         const target = this.db.prepare('SELECT idx,time FROM bars WHERE dataset_id=? AND time>=? ORDER BY time LIMIT 1').get(id, time) as { idx: number; time: number };
         return { index: target.idx, time: target.time };
     }
+    private sourceBounds(dataset: DatasetMeta): { first: SourceBoundary; last: SourceBoundary } {
+        const first = this.db.prepare('SELECT idx,time FROM bars WHERE dataset_id=? ORDER BY idx LIMIT 1').get(dataset.id) as SourceBoundary | undefined;
+        const last = this.db.prepare('SELECT idx,time FROM bars WHERE dataset_id=? ORDER BY idx DESC LIMIT 1').get(dataset.id) as SourceBoundary | undefined;
+        if (!first || !last || first.idx !== 0 || last.idx + 1 !== dataset.barCount || first.time !== dataset.start || last.time + dataset.intervalMs !== dataset.end) throw new AppError(400, 'Cached source bounds do not match the dataset.');
+        return { first, last };
+    }
+    resolveEndTime(id: string, time: unknown): number {
+        const dataset = this.dataset(id);
+        if (typeof time !== 'number' || !Number.isSafeInteger(time) || time < 0 || time > 8_640_000_000_000_000) throw new AppError(400, 'Invalid replay end date and time.');
+        const { first, last } = this.sourceBounds(dataset);
+        if (time < first.time || time > dataset.end) throw new AppError(400, 'The requested end date and time is outside the cached data.');
+        if (time > last.time) return last.idx + 1;
+        const target = this.db.prepare('SELECT idx FROM bars WHERE dataset_id=? AND time>=? ORDER BY time LIMIT 1').get(id, time) as { idx: number } | undefined;
+        if (!target) throw new AppError(400, 'The requested replay end has no matching source boundary.');
+        return target.idx;
+    }
     navigation(session: Session, time: number): SessionNavigation {
         const target = this.resolveTime(session.config.datasetId, time);
+        if (session.config.endIndex !== undefined && target.index >= session.config.endIndex) throw new AppError(400, 'Choose a date and time within the selected replay range.');
         if (target.index <= session.cursor) throw new AppError(400, 'Choose a date and time after the current replay bar.');
         const current = this.db.prepare('SELECT time FROM bars WHERE dataset_id=? AND idx=?').get(session.config.datasetId, session.cursor) as { time: number } | undefined;
         return { currentIndex: session.cursor, currentTime: current?.time ?? null, targetIndex: target.index, targetTime: target.time };
@@ -122,14 +141,26 @@ export class ReplayStore {
     session(id: string): Session {
         const row = this.db.prepare('SELECT state FROM sessions WHERE id=?').get(id) as { state: string } | undefined;
         if (!row) throw new AppError(404, 'Session not found.', 'NOT_FOUND');
-        return JSON.parse(row.state) as Session;
+        const state = JSON.parse(row.state) as Session;
+        const dataset = this.dataset(state.config.datasetId);
+        const config = validateSessionConfig(state.config, dataset.barCount);
+        integer(state.cursor, 'Cursor', config.startIndex - 1, (config.endIndex ?? dataset.barCount) - 1);
+        return state;
     }
     sessions(): SessionSummary[] {
         return (this.db.prepare('SELECT summary FROM sessions ORDER BY updated_at DESC LIMIT ?').all(MAX_SESSIONS) as { summary: string }[]).map(row => JSON.parse(row.summary) as SessionSummary);
     }
     private summarize(state: Session): SessionSummary {
         const dataset = this.dataset(state.config.datasetId);
-        return { id: state.id, name: state.config.name, datasetId: dataset.id, symbol: dataset.symbol, mode: state.config.mode, status: state.status, cursor: state.cursor, barCount: dataset.barCount, equity: state.account.equity, netPnl: state.account.netPnl, trades: state.trades.length, updatedAt: state.updatedAt, revision: state.revision };
+        this.sourceBounds(dataset);
+        const config = validateSessionConfig(state.config, dataset.barCount);
+        const endIndex = config.endIndex ?? dataset.barCount;
+        integer(state.cursor, 'Cursor', config.startIndex - 1, endIndex - 1);
+        const start = this.db.prepare('SELECT time FROM bars WHERE dataset_id=? AND idx=?').get(dataset.id, config.startIndex) as { time: number } | undefined;
+        const last = this.db.prepare('SELECT time FROM bars WHERE dataset_id=? AND idx=?').get(dataset.id, endIndex - 1) as { time: number } | undefined;
+        const end = endIndex === dataset.barCount ? undefined : this.db.prepare('SELECT time FROM bars WHERE dataset_id=? AND idx=?').get(dataset.id, endIndex) as { time: number } | undefined;
+        if (!start || !last || (endIndex < dataset.barCount && !end)) throw new AppError(400, 'The selected replay range is outside the cached source.');
+        return { id: state.id, name: config.name, datasetId: dataset.id, symbol: dataset.symbol, mode: config.mode, status: state.status, cursor: state.cursor, barCount: dataset.barCount, startIndex: config.startIndex, endIndex, startTime: start.time, endTime: endIndex === dataset.barCount ? dataset.end : end!.time, equity: state.account.equity, netPnl: state.account.netPnl, trades: state.trades.length, updatedAt: state.updatedAt, revision: state.revision };
     }
     createSession(session: Session): Session {
         const count = this.db.prepare('SELECT COUNT(*) AS count FROM sessions').get() as { count: number };

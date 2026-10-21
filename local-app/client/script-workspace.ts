@@ -19,6 +19,7 @@ registerLegendAction({ id: 'local.edit-pine', icon: 'local-pine', tooltip: 'Open
 
 interface Options {
     workspace: VelaWorkspace; api: LocalApi; session: () => SessionView | null;
+    initialOpen?: boolean;
     cutoff: () => number | null; blocked: () => boolean; onChange: () => Promise<void>; onError: (error: unknown) => void;
 }
 export interface ScriptWorkspaceResult {
@@ -39,6 +40,7 @@ interface ReportRequest {
     handle?: IndicatorHandle; fixed?: BacktestSnapshot; name?: string;
     operationId?: string; assertCurrent?: () => void;
 }
+interface ScriptOwner { chart: Vela; sessionId: string; handle: IndicatorHandle }
 
 interface ReplaySeriesResponse {
     bars: OHLCV[]; symbolInfo: SymbolInfo; hasMore: boolean; cursorTime: number | null;
@@ -136,7 +138,10 @@ export function mountScriptWorkspace(options: Options): ScriptWorkspace {
         return operation.finally(() => { scriptOperations.delete(operation); });
     }
     let currentRun: ScriptRunResult | undefined; let offRun: (() => void) | undefined;
-    let linkedOwner: { chart: Vela; sessionId: string; handle: IndicatorHandle } | undefined;
+    let linkedOwner: ScriptOwner | undefined;
+    let editRequest = 0;
+    let chartExecution = 0;
+    let codeUpdate = 0;
     let reportRequest: ReportRequest | undefined;
     let rangeDataset = '';
     const refreshRecovery = (): void => {
@@ -164,7 +169,7 @@ export function mountScriptWorkspace(options: Options): ScriptWorkspace {
         }, null, 2);
     };
     const stopBacktest = async (): Promise<void> => { backtestController?.abort(); await backtestPending?.catch(() => undefined); };
-    const runs = new Map<string, ScriptRunResult>();
+    const runs = new Map<ScriptRunResult, { chart: Vela; handle?: IndicatorHandle }>();
     const rail = root.querySelector('.vela-widget-panels');
     const railButtons = (['editor', 'tester'] as const).map((tab) => {
         const button = document.createElement('button'); button.type = 'button';
@@ -180,6 +185,30 @@ export function mountScriptWorkspace(options: Options): ScriptWorkspace {
         if (disposed || preparing || options.blocked()) throw new Error('Pause replay and wait for the workspace to finish saving before running a script.');
         const view = options.session(); if (!view) throw new Error('Open a replay session first.');
         return view;
+    };
+    const assertLinked = (id: string): ScriptOwner => {
+        const owner = linkedOwner;
+        if (!owner || owner.handle.id !== id || owner.chart !== workspace.chart || owner.sessionId !== options.session()?.session.id
+            || !owner.chart.indicators().includes(owner.handle) || owner.handle.source === undefined) {
+            throw new Error('The linked script belongs to another chart or replay session. Open it from the active chart again.');
+        }
+        return owner;
+    };
+    const chartGuard = (chart: Vela, sessionId: string, execution: number, handle?: IndicatorHandle, freezeCursor = true, freezeScript = false): (() => SessionView) => {
+        const view = options.session(); const datasetId = view?.dataset.id; const checksum = view?.dataset.checksum;
+        const cursor = view?.session.cursor; const cutoff = options.cutoff(); const timeframe = chart.market.timeframe;
+        const source = handle?.source; const inputs = freezeScript && handle ? settingsKey(handle.inputValues()) : undefined;
+        const props = freezeScript && handle ? settingsKey(handle.propValues()) : undefined;
+        return () => {
+            const current = options.session();
+            if (disposed || execution !== chartExecution || workspace.chart !== chart || !current || current.session.id !== sessionId
+                || current.dataset.id !== datasetId || current.dataset.checksum !== checksum || freezeCursor && (current.session.cursor !== cursor || options.cutoff() !== cutoff)
+                || chart.market.timeframe !== timeframe || handle && (!chart.indicators().includes(handle)
+                    || freezeScript && (handle.source !== source || settingsKey(handle.inputValues()) !== inputs || settingsKey(handle.propValues()) !== props))) {
+                throw new Error('The chart, script or replay session changed while the script was running. Open it from the intended chart again.');
+            }
+            return current;
+        };
     };
     const refreshLibrary = async (): Promise<void> => {
         const saved = await api.get<BacktestSummary[]>('/api/backtests');
@@ -230,44 +259,59 @@ export function mountScriptWorkspace(options: Options): ScriptWorkspace {
         displayedRunId = owner?.id ?? ''; library.value = displayedRunId;
     };
     const run = async (source: string): Promise<{ id: string; name: string; warnings?: string[] }> => {
-        assertReady(); await stopBacktest(); await persistRun(); const chart = workspace.chart;
-        const sessionId = assertReady().session.id;
+        const sessionId = assertReady().session.id; const chart = workspace.chart; let execution = chartExecution;
+        const assertOwner = chartGuard(chart, sessionId, execution);
+        await stopBacktest(); assertOwner(); await persistRun(); assertOwner();
         const result = await chart.runScript(source, { language: 'pine' });
         if (!result.ok || !result.run) throw result.error ?? new Error('The script could not run.');
-        if (disposed || workspace.chart !== chart || options.session()?.session.id !== sessionId) { result.remove(); throw new Error('The chart or replay session changed while the script was running.'); }
+        try { assertOwner(); } catch (error) { result.remove(); throw error; }
+        execution = ++chartExecution;
         const handle = chart.indicators().find(handle => handle.id === result.run!.id);
-        if (handle) linkedOwner = { chart, sessionId, handle };
+        linkedOwner = handle ? { chart, sessionId, handle } : undefined;
+        const assertRunOwner = chartGuard(chart, sessionId, execution, handle, false);
         reportRequest = { source, document: null, chart, sessionId, handle, name: result.run.title }; deep.checked = false; refreshControls();
-        runs.set(result.run.id, result); currentRun = result;
+        runs.set(result, { chart, handle }); currentRun = result;
         const update = async (item: NonNullable<ScriptRunResult['run']>, explicit = false): Promise<void> => {
             if (!item.strategy || disposed) return;
             const generation = resultGeneration;
-            const view = options.session(); if (!view) return;
+            if (execution !== chartExecution || !runs.has(result)) return;
+            assertRunOwner();
+            const assertCurrent = chartGuard(chart, sessionId, execution, handle, true, true);
+            const view = assertCurrent();
             const trades = [...await item.trades()];
             if (disposed || generation !== resultGeneration || !explicit && (working || snapshot)) return;
+            assertCurrent();
             await showResult({ name: item.title, symbol: view.dataset.symbol, timeframe: chart.market.timeframe ?? '1',
                 from: view.dataset.start, to: options.cutoff() ?? view.dataset.start, state: item.strategy, trades,
-                warnings: [...item.warnings.map((warning) => warning.message), 'Chart execution uses the loaded chart window (up to 5,000 bars). Use Backtest for the complete revealed history.'] });
+                warnings: [...item.warnings.map((warning) => warning.message), 'Chart execution uses the loaded chart window (up to 5,000 bars). Use Backtest for the complete revealed history.'] }, undefined, assertCurrent);
         };
         offRun?.(); offRun = result.onUpdate((item) => { if (!working && !snapshot && activeTab === 'tester') void update(item).catch(options.onError); });
         await options.onChange();
+        assertRunOwner();
         if (result.run.kind === 'strategy') await update(result.run, true);
         return { id: result.run.id, name: result.run.title, warnings: result.run.warnings.map((warning) => warning.message) };
     };
     const update = async (id: string, source: string): Promise<void> => {
-        assertReady(); await stopBacktest(); await persistRun(); const chart = workspace.chart;
-        const handle = chart.indicators().find((item) => item.id === id);
-        if (!handle?.source) throw new Error('The script instance is no longer on the active chart. Add it again.');
+        assertReady(); const { chart, sessionId, handle } = assertLinked(id); const revision = ++codeUpdate;
+        const assertChart = chartGuard(chart, sessionId, chartExecution, handle);
+        const assertOwner = (): SessionView => {
+            if (revision !== codeUpdate) throw new Error('The script update was superseded. Open it from the intended chart again.');
+            return assertChart();
+        };
+        await stopBacktest(); assertOwner(); await persistRun(); assertOwner(); assertLinked(id);
         const result = await handle.updateCode(source); if (!result.ok) throw result.error ?? new Error('The edited script could not run.');
-        const sessionId = assertReady().session.id;
+        assertOwner(); assertLinked(id);
         linkedOwner = { chart, sessionId, handle }; reportRequest = { source, document: null, chart, sessionId, handle, name: handle.title };
         deep.checked = false; refreshControls();
         await options.onChange();
-        const context = await handle.context(['strategy', 'trades', 'warnings']); const view = options.session();
-        if (context?.strategy && view && !disposed) await showResult({ name: handle.title, symbol: view.dataset.symbol,
+        assertOwner();
+        const assertContext = chartGuard(chart, sessionId, chartExecution, handle, true, true);
+        const context = await handle.context(['strategy', 'trades', 'warnings']); const view = assertOwner();
+        assertContext();
+        if (context?.strategy) await showResult({ name: handle.title, symbol: view.dataset.symbol,
             timeframe: chart.market.timeframe ?? '1', from: view.dataset.start, to: options.cutoff() ?? view.dataset.start,
             state: context.strategy, trades: context.trades ?? [],
-            warnings: [...context.warnings.map((warning) => warning.message), 'Chart execution uses up to 5,000 loaded candles. Backtest uses complete revealed history.'] });
+            warnings: [...context.warnings.map((warning) => warning.message), 'Chart execution uses up to 5,000 loaded candles. Backtest uses complete revealed history.'] }, undefined, () => { assertOwner(); assertContext(); });
     };
     const backtest = async (request: ReportRequest, mode: 'replay' | 'deep', range?: { from: number; to: number }): Promise<ScriptWorkspaceResult> => {
         const { source, document } = request;
@@ -416,7 +460,15 @@ export function mountScriptWorkspace(options: Options): ScriptWorkspace {
         editor = mountPineEditor(editorHost, { api, storageKey,
             onRun: (source) => track(() => run(source)), onUpdate: (id, source) => track(() => update(id, source)), onBacktest: editorBacktest,
             onClose: () => { panel.close(); }, onRemove: (id: string) => track(async () => {
-                assertReady(); const handle = workspace.chart.indicators().find((item) => item.id === id); handle?.remove(); runs.delete(id); await options.onChange();
+                assertReady(); const owner = assertLinked(id); const execution = chartExecution;
+                const assertOwner = chartGuard(owner.chart, owner.sessionId, execution, owner.handle);
+                await stopBacktest(); assertOwner(); await persistRun(); assertOwner(); assertLinked(id);
+                chartExecution++; owner.handle.remove(); linkedOwner = undefined; offRun?.(); offRun = undefined;
+                for (const [run, binding] of runs) if (binding.handle === owner.handle && binding.chart === owner.chart) {
+                    runs.delete(run); if (currentRun === run) currentRun = undefined;
+                }
+                if (reportRequest?.handle === owner.handle) reportRequest = undefined;
+                refreshControls(); await options.onChange();
             }) }); return editor;
     });
     async function open(tab: 'replay' | 'editor' | 'tester'): Promise<void> {
@@ -481,11 +533,12 @@ export function mountScriptWorkspace(options: Options): ScriptWorkspace {
         const value = (event as CustomEvent<{ id: string; source: string; name: string }>).detail;
         const chart = workspace.chart; const view = options.session(); const handle = chart.indicators().find(item => item.id === value.id);
         if (!view || !handle || handle.source !== value.source) { options.onError(new Error('This script is no longer on the active chart. Open it from its chart again.')); return; }
-        linkedOwner = { chart, sessionId: view.session.id, handle };
+        const sessionId = view.session.id; const request = ++editRequest;
         void open('editor').then(async () => {
             const controller = await getEditor();
-            if (disposed || workspace.chart !== chart || options.session()?.session.id !== view.session.id || !chart.indicators().includes(handle)) throw new Error('The chart or replay session changed while opening the script.');
-            controller.open({ source: value.source, name: value.name, instanceId: value.id });
+            if (request !== editRequest) return;
+            if (disposed || workspace.chart !== chart || options.session()?.session.id !== sessionId || !chart.indicators().includes(handle) || handle.source !== value.source) throw new Error('The chart or replay session changed while opening the script.');
+            if (controller.open({ source: value.source, name: value.name, instanceId: value.id })) linkedOwner = { chart, sessionId, handle };
         }).catch(options.onError);
     };
     const containKeys = (event: KeyboardEvent): void => { event.stopPropagation(); };
@@ -495,7 +548,7 @@ export function mountScriptWorkspace(options: Options): ScriptWorkspace {
     };
     const deepChange = (): void => { refreshControls(); };
     dock.addEventListener('click', click); dock.addEventListener('keydown', containKeys); deep.addEventListener('change', deepChange); library.addEventListener('change', change); root.addEventListener('local-pine:edit', edit); root.addEventListener('local-replay:chrome', chrome);
-    if (options.session()) { dock.hidden = false; dock.querySelector('[data-script-tab=replay]')!.setAttribute('aria-selected', 'true'); }
+    if (options.session() && options.initialOpen !== false) { dock.hidden = false; dock.querySelector('[data-script-tab=replay]')!.setAttribute('aria-selected', 'true'); }
     return { flush: async () => { await editor?.flush(); await persistRun(); },
         prepareForUpdate: async () => {
             preparing = true;
@@ -510,7 +563,9 @@ export function mountScriptWorkspace(options: Options): ScriptWorkspace {
             if (!operationId || backtestOperationId !== operationId || !backtestController || backtestController.signal.aborted) return false;
             backtestController.abort(); return true;
         },
-        destroy: () => { disposed = true; backtestController?.abort(); offRun?.(); for (const value of runs.values()) value.remove();
+        destroy: () => { disposed = true; backtestController?.abort(); offRun?.(); for (const [value, binding] of runs) {
+            if (!binding.handle || binding.chart.indicators().includes(binding.handle)) value.remove();
+        }
             editor?.destroy(); results?.destroy(); railButtons.forEach((button) => button.remove()); dock.removeEventListener('click', click); dock.removeEventListener('keydown', containKeys); deep.removeEventListener('change', deepChange); library.removeEventListener('change', change);
             root.removeEventListener('local-pine:edit', edit); root.removeEventListener('local-replay:chrome', chrome);
             root.dispatchEvent(new CustomEvent('local-replay:chrome', { bubbles: true, detail: { kind: 'replay-stats-unmount' } })); panel.destroy(); undock(); },

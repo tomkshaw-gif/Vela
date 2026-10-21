@@ -2,8 +2,9 @@
  * The authoritative, user-controlled pan/zoom state of the time axis.
  *
  * - `barSpacing`: pixels between adjacent bar centers (the zoom level).
- * - `rightOffset`: how many bar-widths the LAST bar sits from the right edge
- *   (the pan position). May be negative (last bar scrolled off the right).
+ * - `rightOffset`: distance in bar-widths from the last bar's center (`bar-center`)
+ *   or its slot's right edge (`bar-edge`) to the plot's right edge. The renderer
+ *   selects the convention; the latter adds half a bar to the center's distance.
  *
  * The chart width and bar count are NOT part of this state — they are owned by
  * the renderer (resize / setBars) and combined with the viewport in the
@@ -12,6 +13,13 @@
 export interface ViewportState {
     barSpacing: number;
     rightOffset: number;
+}
+
+export type RightOffsetConvention = 'bar-center' | 'bar-edge';
+
+/** Center-to-edge phase in logical bar units. */
+export function rightOffsetPhase(convention: RightOffsetConvention): number {
+    return convention === 'bar-edge' ? 0.5 : 0;
 }
 
 export const MIN_BAR_SPACING = 0.5;

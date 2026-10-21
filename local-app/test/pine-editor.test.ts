@@ -91,6 +91,46 @@ function submitName(host: HTMLElement, name: string): void {
 }
 
 describe('Pine editor draft and revision safety', () => {
+    it('recovers a directed selection and scroll offsets after remounting an isolated draft', async () => {
+        const key = 'test.caret-recovery', f = fixture(key); f.controller.open({ source: CHANGED });
+        view(f.host).dispatch({ selection: { anchor: CHANGED.length - 2, head: 9 } });
+        view(f.host).scrollDOM.scrollTop = 120; view(f.host).scrollDOM.scrollLeft = 30;
+        await f.controller.flush(); f.controller.destroy(); f.host.remove();
+        const restored = fixture(key); restored.controller.open();
+        expect(view(restored.host).state.selection.main).toMatchObject({ anchor: CHANGED.length - 2, head: 9 });
+        expect(view(restored.host).scrollDOM.scrollTop).toBe(120); expect(view(restored.host).scrollDOM.scrollLeft).toBe(30);
+    });
+    it('recovers each dirty draft selection across library switches and clamps malformed positions', async () => {
+        const f = fixture(); f.controller.open({ source: CHANGED, name: 'First' });
+        view(f.host).dispatch({ selection: { anchor: 8, head: 15 } });
+        f.controller.open({ source: BASE, name: 'Second' });
+        click(f.host, /^Library$/);
+        const filter = f.host.querySelector<HTMLSelectElement>('[aria-label="Script library filter"]')!;
+        filter.value = 'drafts'; filter.dispatchEvent(new Event('change'));
+        click(f.host, /^First/);
+        expect(view(f.host).state.selection.main).toMatchObject({ anchor: 8, head: 15 });
+        await f.controller.flush(); f.controller.destroy(); f.host.remove();
+        const data = JSON.parse(localStorage.getItem(PINE_EDITOR_STORAGE_KEY)!) as { activeKey: string; drafts: { key: string; view?: unknown }[] };
+        data.drafts.find(d => d.key === data.activeKey)!.view = { anchor: 999999, head: -50, scrollTop: -100, scrollLeft: null };
+        localStorage.setItem(PINE_EDITOR_STORAGE_KEY, JSON.stringify(data));
+        const recovered = fixture();
+        expect(view(recovered.host).state.selection.main).toMatchObject({ anchor: CHANGED.length, head: 0 });
+        expect(view(recovered.host).scrollDOM.scrollTop).toBe(0);
+    });
+    it('remembers clean saved-document positions only for the same revision and source', async () => {
+        const f = fixture('test.clean-document-position'); f.controller.open({ id: ID });
+        await vi.waitFor(() => expect(view(f.host).state.doc.toString()).toBe(BASE));
+        view(f.host).dispatch({ selection: { anchor: 17, head: 21 } });
+        f.controller.open({ source: 'other', name: 'Other' });
+        f.controller.open({ id: ID });
+        await vi.waitFor(() => expect(view(f.host).state.doc.toString()).toBe(BASE));
+        expect(view(f.host).state.selection.main).toMatchObject({ anchor: 17, head: 21 });
+        f.controller.open({ source: 'other' });
+        f.get.mockImplementation(async path => path === `/api/scripts/${ID}` ? { ...INITIAL, revision: 5 } : []);
+        f.controller.open({ id: ID });
+        await vi.waitFor(() => expect(view(f.host).state.doc.toString()).toBe(BASE));
+        expect(view(f.host).state.selection.main.head).toBe(0);
+    });
     it('uses a scoped recovery key per window and reuses its session identity across editor remounts', async () => {
         const dataA = new Map<string, string>(), dataB = new Map<string, string>();
         const storage = (data: Map<string, string>) => ({ getItem: (key: string) => data.get(key) ?? null, setItem: (key: string, value: string) => { data.set(key, value); } });
@@ -182,6 +222,7 @@ describe('Pine editor draft and revision safety', () => {
         const pending = deferred<ScriptDocument>(); const f = fixture();
         f.get.mockImplementation(async path => path === `/api/scripts/${ID}` ? pending.promise : []);
         f.controller.open({ id: ID });
+        expect(f.controller.open({ source: 'another chart', instanceId: 'other-instance' })).toBe(false);
         edit(f.host, CHANGED);
         pending.resolve({ ...INITIAL });
         await new Promise<void>(resolve => setTimeout(resolve, 0));

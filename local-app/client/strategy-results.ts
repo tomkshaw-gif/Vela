@@ -139,6 +139,7 @@ export function mountStrategyResults(host: HTMLElement, options: StrategyResults
     root.innerHTML = `<header class="sr-header"><h2>Strategy report</h2><p class="sr-context">Run a strategy to review its results.</p></header><div class="sr-toolbar"><div class="sr-tabs" role="tablist" aria-label="Backtest views">${([['performance', 'Report'], ['trades', 'List of trades']] as const).map(([key, label]) => `<button type="button" role="tab" id="${id}-${key}" aria-controls="${id}-panel" data-tab="${key}" aria-selected="${key === 'performance'}" tabindex="${key === 'performance' ? '0' : '-1'}"><svg viewBox="0 0 18 18" aria-hidden="true"><path d="${key === 'performance' ? 'M3 14V9h2v5M8 14V4h2v10M13 14V7h2v7' : 'M3 4h2m2 0h8M3 9h2m2 0h8M3 14h2m2 0h8'}"/></svg>${label}</button>`).join('')}</div><div class="sr-actions"><button type="button" data-action="export-csv" disabled>Export metrics CSV</button><details class="sr-more"><summary aria-label="More report tools">More ···</summary><button type="button" data-tab="simulation" id="${id}-simulation">Simulation</button></details></div></div><div class="sr-warnings" aria-live="polite"></div><div class="sr-content" id="${id}-panel" role="tabpanel" aria-labelledby="${id}-performance">${empty('Run a strategy to populate this viewer.')}</div>`;
     host.append(root);
     const content = root.querySelector<HTMLElement>('.sr-content')!;
+    content.tabIndex = -1;
     let snapshot: StrategyResultsSnapshot | null = null; let analysis: StrategyAnalysis | null = null;
     let tab: Tab = 'performance'; let destroyed = false; let rows: TradeRow[] = [];
     let sort: SortKey = 'index'; let ascending = true; let page = 0; let pageSize = 25;
@@ -174,6 +175,31 @@ export function mountStrategyResults(host: HTMLElement, options: StrategyResults
     chartResize?.observe(root);
 
     function cancelSimulation(): void { generation++; abort?.abort(); abort = null; }
+    function preserveFocus(render: () => void): void {
+        const active = document.activeElement;
+        const focused = active instanceof HTMLElement && root.contains(active) ? active : null;
+        const identity = focused ? ['control', 'sort', 'action', 'day', 'section', 'value', 'tab', 'go'].filter(key => focused.dataset[key] !== undefined)
+            .map(key => [key, focused.dataset[key]] as const) : [];
+        const disclosure = focused?.matches('summary') && focused.parentElement instanceof HTMLDetailsElement ? focused.parentElement : null;
+        const disclosureOpen = disclosure?.open;
+        const selection = focused instanceof HTMLInputElement || focused instanceof HTMLTextAreaElement
+            ? { start: focused.selectionStart, end: focused.selectionEnd, direction: focused.selectionDirection } : null;
+        render();
+        if (!focused || document.activeElement === focused && root.contains(focused) && !focused.matches(':disabled')) return;
+        const replacement = [...root.querySelectorAll<HTMLElement>('button, input, select, textarea, summary')].find(element => {
+            if (element.tagName !== focused.tagName || element.matches(':disabled') || element.closest('[hidden]')) return false;
+            if (focused.id) return element.id === focused.id;
+            if (identity.length) return identity.every(([key, value]) => element.dataset[key] === value);
+            if (focused.getAttribute('name')) return element.getAttribute('name') === focused.getAttribute('name');
+            return disclosure && element.parentElement?.className === disclosure.className
+                && (disclosure.classList.contains('sr-calculation-notes') || element.textContent === focused.textContent);
+        });
+        if (replacement?.parentElement instanceof HTMLDetailsElement && disclosureOpen !== undefined) replacement.parentElement.open = disclosureOpen;
+        (replacement ?? root.querySelector<HTMLElement>('[role="tab"][tabindex="0"]') ?? content).focus({ preventScroll: true });
+        if (selection?.start != null && selection.end != null && (replacement instanceof HTMLInputElement || replacement instanceof HTMLTextAreaElement)) {
+            replacement.setSelectionRange(selection.start, selection.end, selection.direction ?? undefined);
+        }
+    }
     function summary(): string {
         const account = analysis!.account;
         const count = account.wins !== null && account.losses !== null && account.even !== null ? account.wins + account.losses + account.even : null;
@@ -190,11 +216,15 @@ export function mountStrategyResults(host: HTMLElement, options: StrategyResults
         if (!(capital !== null && capital > 0)) curveUnit = 'currency';
         const points = (curveMode === 'drawdown' ? a.equity.drawdown : a.equity.points).map(point => ({ ...point, value: curveUnit === 'percent' ? (curveMode === 'drawdown' ? point.value : point.value - capital!) / capital! * 100 : point.value }));
         const label = `${actual ? 'Reported account' : 'Closed-trade'} ${curveMode === 'drawdown' ? 'drawdown' : 'equity'}${curveUnit === 'percent' ? ' (%)' : ''}`;
+        const basis = curveMode === 'drawdown' ? `Drawdown from observed peak${curveUnit === 'percent' ? ' / initial capital, in percent.' : ', in account currency.'}`
+            : curveUnit === 'percent' ? 'Equity change from initial capital / initial capital, in percent.' : 'Account equity level, including initial capital, in account currency.';
+        const sampled = chartPoints(points);
+        const coverage = points.length ? `${fmt(points.length)} ${actual ? 'supplied observations' : 'closed-trade equity observations'}; ${fmt(sampled.length)} plotted${sampled.length < points.length ? ' as an extrema sample across the supplied history' : ''}. ${date(points[0]!.time, true)} UTC — ${date(points.at(-1)!.time, true)} UTC.` : 'No finite equity observations are available.';
         const atTime = new Map(a.closedTrades.map(trade => [trade.exitTime, trade]));
         content.innerHTML = `<section class="sr-overview"><div class="sr-section-heading"><h3>Metrics</h3><span>Account currency</span></div><div class="sr-summary">${summary()}</div><div class="sr-curve-toolbar"><strong>${escape(label)}</strong><div><label>Curve<select data-control="curve-mode"><option value="equity" ${curveMode === 'equity' ? 'selected' : ''}>Equity</option><option value="drawdown" ${curveMode === 'drawdown' ? 'selected' : ''}>Drawdown</option></select></label><label>Unit<select data-control="curve-unit"><option value="currency">Currency</option>${capital !== null && capital > 0 ? `<option value="percent" ${curveUnit === 'percent' ? 'selected' : ''}>% of initial capital</option>` : ''}</select></label></div></div>${lineChart([{ label, points, className: curveMode === 'drawdown' ? 'sr-negative' : '' }], true, point => {
             const trade = atTime.get(point.time);
             return `${date(point.time, true)} UTC · ${label}: ${fmt(point.value)}${trade ? ` · Trade ${trade.index + 1} · ${trade.side} · Cumulative P&L ${fmt(trade.cumulativePnl)}` : ''}`;
-        })}<p class="sr-note">${actual ? 'Runtime equity observations; sampled history can miss intrabar extremes.' : 'Closed-trade equity · initial capital plus reported realized P&L. Open-position and intrabar changes are excluded.'}${a.equity.complete ? '' : ' Incomplete curve coverage.'} Engine account drawdown is a separate metric.</p></section><section class="sr-report-section"><div class="sr-section-heading"><h3>Performance analysis</h3></div>${segmented('performance', [['breakdown', 'Breakdown'], ['periodical', 'Periodical'], ['growth', 'Growth and decline']], performanceView)}<div class="sr-performance-analysis"></div><details class="sr-detail-table"><summary>Performance metrics · All / Long / Short</summary>${metricsTable(a, [
+        })}<p class="sr-note sr-curve-basis">${escape(basis)}</p><p class="sr-note sr-curve-coverage">${escape(coverage)}</p><p class="sr-note">${actual ? 'Runtime equity observations; sampled history can miss intrabar extremes.' : 'Closed-trade equity · initial capital plus reported realized P&L. Open-position and intrabar changes are excluded.'}${a.equity.complete ? '' : ' Incomplete curve coverage.'} Engine account drawdown is a separate metric.</p></section><section class="sr-report-section"><div class="sr-section-heading"><h3>Performance analysis</h3></div>${segmented('performance', [['breakdown', 'Breakdown'], ['periodical', 'Periodical'], ['growth', 'Growth and decline']], performanceView)}<div class="sr-performance-analysis"></div><details class="sr-detail-table"><summary>Performance metrics · All / Long / Short</summary>${metricsTable(a, [
             { label: 'Net P&L after reported commission', key: 'netPnl' }, { label: 'Positive net outcomes', key: 'grossProfit' }, { label: 'Negative net outcomes (magnitude)', key: 'grossLoss' },
             { label: 'Profit factor', key: 'profitFactor' }, { label: 'Profitable trades', key: 'winRate', format: pct }, { label: 'Return on initial capital', key: 'returnPct', format: pct },
             { label: 'Reported commission', key: 'commission' }, { label: 'Closed trades', key: 'count' }, { label: 'Trades with reported P&L', key: 'knownPnlCount' },
@@ -335,7 +365,7 @@ export function mountStrategyResults(host: HTMLElement, options: StrategyResults
         root.querySelector<HTMLDetailsElement>('.sr-more')!.open = false;
         content.setAttribute('aria-labelledby', `${id}-${tab}`); renderTab();
     }
-    function click(event: Event): void {
+    function clickAction(event: Event): void {
         const button = (event.target as Element).closest<HTMLButtonElement>('button'); if (!button || !root.contains(button) || button.disabled) return;
         if (button.dataset.tab) { selectTab(button.dataset.tab as Tab); return; }
         if (button.dataset.section) {
@@ -360,7 +390,7 @@ export function mountStrategyResults(host: HTMLElement, options: StrategyResults
         if (action === 'month-prev' || action === 'month-next') { const value = new Date(`${month}-01T00:00:00Z`); value.setUTCMonth(value.getUTCMonth() + (action === 'month-next' ? 1 : -1)); if (Number.isFinite(value.getTime())) month = value.toISOString().slice(0, 7); renderLogResults(); }
         if (action === 'cancel-simulation') { cancelSimulation(); renderSimulation(); content.querySelector<HTMLElement>('.sr-sim-status')!.textContent = 'Simulation cancelled.'; }
     }
-    function change(event: Event): void {
+    function changeAction(event: Event): void {
         const input = event.target as HTMLInputElement; const control = input.dataset.control; if (!control || control === 'query') return;
         if (control === 'curve-mode' || control === 'curve-unit') { if (control === 'curve-mode') curveMode = input.value; else curveUnit = input.value; renderPerformance(); return; }
         if (control === 'period-interval' && ['day', 'week', 'month', 'quarter', 'year'].includes(input.value)) { periodInterval = input.value as PeriodInterval; renderPerformanceSection(); return; }
@@ -377,38 +407,42 @@ export function mountStrategyResults(host: HTMLElement, options: StrategyResults
         event.preventDefault(); event.stopPropagation(); selectTab(tabs[index]!, true);
     }
     function submit(event: Event): void { if ((event.target as Element).matches('.sr-simulation-form')) { event.preventDefault(); event.stopPropagation(); void startSimulation(); } }
+    const click = (event: Event): void => preserveFocus(() => clickAction(event));
+    const change = (event: Event): void => preserveFocus(() => changeAction(event));
     root.addEventListener('click', click); root.addEventListener('change', change); root.addEventListener('input', input); root.addEventListener('keydown', keydown); root.addEventListener('submit', submit);
     return {
         update(value) {
             if (destroyed) return;
-            cancelSimulation(); simulation = null;
-            snapshot = { ...value, state: { ...value.state }, trades: value.trades.map(t => ({ ...t, entry: { ...t.entry }, ...(t.exit ? { exit: { ...t.exit } } : {}) })),
-                ...(value.equity ? { equity: value.equity.map(p => ({ ...p })) } : {}), ...(value.warnings ? { warnings: [...value.warnings] } : {}) };
-            analysis = analyzeStrategy(snapshot); page = 0;
-            const a = analysis;
-            const cumulative = new Map(a.closedTrades.map(t => [t.index, t.cumulativePnl]));
-            rows = value.trades.map((t, index) => {
-                const entryTime = Number.isFinite(new Date(t.entry.time).getTime()) ? finite(t.entry.time) : null;
-                const exitTime = t.exit && Number.isFinite(new Date(t.exit.time).getTime()) ? finite(t.exit.time) : null;
-                return { index, id: t.id, side: t.side, open: t.open || !t.exit, qty: finite(t.qty), entryTime, exitTime, entryPrice: finite(t.entry.price), exitPrice: finite(t.exit?.price),
-                    pnl: t.open || !t.exit ? null : finite(t.pnl), commission: finite(t.commission), cumulativePnl: t.open || !t.exit ? null : cumulative.get(index) ?? null,
-                    mae: finite(t.maxDrawdown) !== null && t.maxDrawdown! >= 0 ? t.maxDrawdown! : null, mfe: finite(t.maxRunup) !== null && t.maxRunup! >= 0 ? t.maxRunup! : null,
-                    durationMs: entryTime !== null && exitTime !== null && exitTime >= entryTime ? exitTime - entryTime : null,
-                    entrySignal: [t.entry.id, t.entry.comment].filter(Boolean).join(' · '), exitSignal: [t.exit?.id, t.exit?.comment].filter(Boolean).join(' · '),
-                    search: [t.id, t.side, t.entry.id, t.entry.comment, t.exit?.id, t.exit?.comment].join(' ').toLowerCase(), };
+            preserveFocus(() => {
+                cancelSimulation(); simulation = null;
+                snapshot = { ...value, state: { ...value.state }, trades: value.trades.map(t => ({ ...t, entry: { ...t.entry }, ...(t.exit ? { exit: { ...t.exit } } : {}) })),
+                    ...(value.equity ? { equity: value.equity.map(p => ({ ...p })) } : {}), ...(value.warnings ? { warnings: [...value.warnings] } : {}) };
+                analysis = analyzeStrategy(snapshot); page = 0;
+                const a = analysis;
+                const cumulative = new Map(a.closedTrades.map(t => [t.index, t.cumulativePnl]));
+                rows = value.trades.map((t, index) => {
+                    const entryTime = Number.isFinite(new Date(t.entry.time).getTime()) ? finite(t.entry.time) : null;
+                    const exitTime = t.exit && Number.isFinite(new Date(t.exit.time).getTime()) ? finite(t.exit.time) : null;
+                    return { index, id: t.id, side: t.side, open: t.open || !t.exit, qty: finite(t.qty), entryTime, exitTime, entryPrice: finite(t.entry.price), exitPrice: finite(t.exit?.price),
+                        pnl: t.open || !t.exit ? null : finite(t.pnl), commission: finite(t.commission), cumulativePnl: t.open || !t.exit ? null : cumulative.get(index) ?? null,
+                        mae: finite(t.maxDrawdown) !== null && t.maxDrawdown! >= 0 ? t.maxDrawdown! : null, mfe: finite(t.maxRunup) !== null && t.maxRunup! >= 0 ? t.maxRunup! : null,
+                        durationMs: entryTime !== null && exitTime !== null && exitTime >= entryTime ? exitTime - entryTime : null,
+                        entrySignal: [t.entry.id, t.entry.comment].filter(Boolean).join(' · '), exitSignal: [t.exit?.id, t.exit?.comment].filter(Boolean).join(' · '),
+                        search: [t.id, t.side, t.entry.id, t.entry.comment, t.exit?.id, t.exit?.comment].join(' ').toLowerCase(), };
+                });
+                if (!month) { const latest = [...rows].reverse().find(row => row.exitTime !== null)?.exitTime ?? value.to; month = date(latest).slice(0, 7); if (!/^\d{4}-\d{2}$/.test(month)) month = new Date().toISOString().slice(0, 7); }
+                root.querySelector('h2')!.textContent = value.name || 'Strategy report';
+                root.querySelector('.sr-context')!.textContent = `${value.symbol} · ${value.timeframe} · ${date(value.from)} — ${date(value.to)}${value.history ? ' (end exclusive)' : ''} · UTC`;
+                if (value.history?.mode === 'deep') {
+                    const badge = document.createElement('span'); badge.className = 'sr-deep-badge'; badge.textContent = 'Deep backtest';
+                    root.querySelector('.sr-context')!.prepend(badge);
+                    root.querySelector('.sr-context')!.append(` · ${fmt(value.history.barCount)} cached bars · independent of replay`);
+                }
+                root.querySelector<HTMLButtonElement>('[data-action="export-csv"]')!.disabled = false;
+                const notes = [...new Set(a.warnings)];
+                root.querySelector('.sr-warnings')!.innerHTML = notes.length ? `<details class="sr-calculation-notes"><summary>Data & calculations · ${notes.length} ${notes.length === 1 ? 'note' : 'notes'}</summary>${notes.map(note => `<p>${escape(note)}</p>`).join('')}</details>` : '';
+                renderTab();
             });
-            if (!month) { const latest = [...rows].reverse().find(row => row.exitTime !== null)?.exitTime ?? value.to; month = date(latest).slice(0, 7); if (!/^\d{4}-\d{2}$/.test(month)) month = new Date().toISOString().slice(0, 7); }
-            root.querySelector('h2')!.textContent = value.name || 'Strategy report';
-            root.querySelector('.sr-context')!.textContent = `${value.symbol} · ${value.timeframe} · ${date(value.from)} — ${date(value.to)}${value.history ? ' (end exclusive)' : ''} · UTC`;
-            if (value.history?.mode === 'deep') {
-                const badge = document.createElement('span'); badge.className = 'sr-deep-badge'; badge.textContent = 'Deep backtest';
-                root.querySelector('.sr-context')!.prepend(badge);
-                root.querySelector('.sr-context')!.append(` · ${fmt(value.history.barCount)} cached bars · independent of replay`);
-            }
-            root.querySelector<HTMLButtonElement>('[data-action="export-csv"]')!.disabled = false;
-            const notes = [...new Set(a.warnings)];
-            root.querySelector('.sr-warnings')!.innerHTML = notes.length ? `<details class="sr-calculation-notes"><summary>Data & calculations · ${notes.length} ${notes.length === 1 ? 'note' : 'notes'}</summary>${notes.map(note => `<p>${escape(note)}</p>`).join('')}</details>` : '';
-            renderTab();
         },
         destroy() {
             if (destroyed) return; destroyed = true; cancelSimulation();

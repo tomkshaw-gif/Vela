@@ -2,7 +2,7 @@
 // reload through the shared pipeline, Pine sessions re-execute over the new market,
 // native indicators restart with a fresh context, the active chart-type data engine is
 // rebuilt, the live subscription re-targets, and history tracking re-arms per load.
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { Vela } from '../src/index';
 import type {
     IChartRenderer,
@@ -20,7 +20,12 @@ import type {
     ExecutionRequest,
     ExecutionHandlers,
     ExecutionSession,
+    EngineContextSnapshot,
 } from '../src/core/ports/ScriptingEngine';
+import type { ScriptRun } from '../src/core/script-run';
+import { Canvas2dBackend } from '../src/renderers/native/backend/Canvas2dBackend';
+import { CoordinateSystem } from '../src/renderers/native/core/CoordinateSystem';
+import { SceneGraph } from '../src/renderers/native/core/SceneGraph';
 import type { MarketDataFeed, BarRange } from '../src/core/ports/MarketDataFeed';
 import type { MarketConfig } from '../src/core/options';
 import type { OHLCV } from '../src/core/model/ohlcv';
@@ -319,6 +324,349 @@ afterEach(() => {
     for (const c of charts.splice(0)) c.destroy();
     unregisterNativeIndicator('probe');
     unregisterChartType('probe-style');
+});
+
+/** Captures actual Canvas paints, including the frame at each bar replacement. */
+class SnapshotCanvasRenderer extends FakeRenderer {
+    readonly scene = new SceneGraph();
+    readonly coords = new CoordinateSystem();
+    readonly backend = new Canvas2dBackend();
+    readonly frames: string[][] = [];
+    private paints: string[] = [];
+    private readonly theme: VelaTheme = { background: '#000', textColor: '#ccc', gridColor: '#222', borderColor: '#333', upColor: '#0a0', downColor: '#a00', fontFamily: 'sans-serif' };
+
+    constructor() {
+        super();
+        this.coords.setSize(800, 200, 1);
+        this.coords.setViewport({ barSpacing: 10, rightOffset: 0 });
+        const ctx = new Proxy({ globalAlpha: 1 } as CanvasRenderingContext2D, {
+            get: (target, key) => key === 'stroke' ? () => this.paints.push(String(target.strokeStyle))
+                : key === 'fillRect' || key === 'fill' ? () => this.paints.push(String(target.fillStyle))
+                : Reflect.has(target, key) ? Reflect.get(target, key) : () => undefined,
+            set: (target, key, value) => Reflect.set(target, key, value),
+        });
+        this.backend.mount({ width: 800, height: 200, getContext: () => ctx } as unknown as HTMLCanvasElement);
+    }
+
+    override setBars(bars: OHLCV[], opts?: { preserveView?: boolean }): void {
+        super.setBars(bars, opts);
+        this.scene.bars = bars;
+        this.coords.setBars(bars.map(bar => bar.time));
+        this.frames.push(this.paint());
+    }
+
+    override ensurePane(pane: Pane): void {
+        const node = this.scene.ensurePane(pane.id, pane.kind, pane.order);
+        node.bounds = { top: 0, height: 200 };
+        node.scale = { min: 0, max: 250 };
+        node.manualScale = node.scale;
+    }
+
+    override mountIndicator(model: IndicatorModel): IndicatorRenderHandle {
+        this.scene.indicators.set(model.id, model);
+        this.scene.barColorsRevision++;
+        return super.mountIndicator(model);
+    }
+
+    paint(): string[] {
+        this.paints = [];
+        this.backend.render(this.scene, this.coords, this.theme);
+        return [...this.paints];
+    }
+
+    override destroy(): void { this.backend.destroy(); }
+}
+
+class SnapshotEngine extends RecordingEngine {
+    autoEmit = true;
+    readonly runs: Array<{ request: ExecutionRequest; handlers: ExecutionHandlers; model: IndicatorModel; contextCalls: number }> = [];
+    holdContext: Promise<void> | null = null;
+
+    override execute(request: ExecutionRequest, handlers: ExecutionHandlers): ExecutionSession {
+        const id = (request.prepared.token as { instanceId: string }).instanceId;
+        const bars = request.bars;
+        const value = bars[bars.length - 1]?.close ?? 0;
+        const model: IndicatorModel = { id, title: 'Snapshot', overlay: true, paneHint: 'price', series: [], fills: [],
+            backgrounds: [], priceLines: bars.length ? [{ id: `${id}:last`, paneId: 'price', price: value, color: '#13579b' }] : [],
+            barColors: bars.map(bar => ({ time: bar.time, color: '#2468ac' })), inputs: [], inputValues: {} };
+        const run = { request, handlers, model, contextCalls: 0 };
+        this.runs.push(run);
+        if (this.autoEmit) { handlers.onModel(model); handlers.onDone?.(); }
+        return { stop() {}, update() {}, setVisibleRange() {}, notifyBars() {}, getContext: async () => {
+            run.contextCalls++;
+            const held = this.holdContext;
+            this.holdContext = null;
+            if (held) await held;
+            return { language: 'pine', phase: 'idle', barIndex: bars.length - 1, meta: { title: 'Snapshot', overlay: true },
+                variables: { length: bars.length }, plots: { last: bars.map(bar => ({ time: bar.time, value: bar.close })) },
+                trades: [{ id: 'local', side: 'long', qty: 1, entry: { id: 'entry', time: bars[0]?.time ?? 0, price: value }, open: true }], warnings: [] } satisfies EngineContextSnapshot;
+        } };
+    }
+}
+
+const snapshotBars = (n: number): OHLCV[] => makeBars(n, 100).map((bar, i) => ({ ...bar, open: 100 + i, high: 102 + i, low: 99 + i, close: 100 + i }));
+
+describe('retreating offline snapshot fences', () => {
+    it('clears future-derived Canvas output when a rewind revises the same aggregate candle', async () => {
+        const time = Date.UTC(2024, 0, 1);
+        const source = snapshotBars(10).map((bar, index) => ({ ...bar, time: time + index * 60_000 }));
+        source[9] = { ...source[9]!, high: 200, close: 199, volume: 100 };
+        const aggregate = (cursor: number): OHLCV[] => [0, 5].map(start => {
+            const rows = source.slice(start, Math.min(start + 5, cursor + 1));
+            return { time: rows[0]!.time, open: rows[0]!.open, high: Math.max(...rows.map(bar => bar.high)),
+                low: Math.min(...rows.map(bar => bar.low)), close: rows[rows.length - 1]!.close, volume: rows.reduce((sum, bar) => sum + (bar.volume ?? 0), 0) };
+        });
+        const later = aggregate(9), earlier = aggregate(8);
+        expect(later[1]!.time).toBe(earlier[1]!.time);
+        expect(later[1]!.close).toBe(199); expect(earlier[1]!.close).toBe(108);
+        const renderer = new SnapshotCanvasRenderer(), engine = new SnapshotEngine();
+        const chart = make({ symbol: 'AAA', timeframe: '5', data: later, volume: false }, { renderer, engines: [engine] });
+        chart.addIndicator('snapshot', { id: 'snapshot' });
+        await chart.ready(); await flush();
+        expect(renderer.paint()).toContain('#13579b'); expect(renderer.paint()).toContain('#2468ac');
+        engine.autoEmit = false; renderer.frames.length = 0;
+        await chart.setMarket({ data: earlier, preserveView: true });
+        const rerun = engine.runs[engine.runs.length - 1]!;
+        const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+        try { rerun.handlers.onError?.(new Error('same-bucket rollback test failure')); } finally { errorLog.mockRestore(); }
+        expect(renderer.paint()).not.toContain('#13579b'); expect(renderer.paint()).not.toContain('#2468ac');
+        expect(renderer.frames.flat()).not.toContain('#13579b'); expect(renderer.frames.flat()).not.toContain('#2468ac');
+        rerun.handlers.onModel(rerun.model);
+        expect(renderer.paint()).toContain('#13579b');
+        expect(renderer.scene.indicators.get('snapshot')!.priceLines[0]!.price).toBe(108);
+    });
+
+    for (const empty of [false, true]) it(`clears future-derived Canvas output before ${empty ? 'an empty snapshot' : 'a retreat'} and a failed rerun`, async () => {
+        const renderer = new SnapshotCanvasRenderer(), engine = new SnapshotEngine();
+        const chart = make({ symbol: 'AAA', timeframe: '60', data: snapshotBars(100), volume: false }, { renderer, engines: [engine] });
+        chart.addIndicator('snapshot', { id: 'snapshot' });
+        await chart.ready(); await flush();
+        expect(renderer.paint()).toContain('#13579b');
+        expect(renderer.paint()).toContain('#2468ac');
+        expect(renderer.scene.indicators.get('snapshot')!.priceLines[0]!.price).toBe(199);
+        const pane = renderer.scene.panes.get('price')!, scale = pane.manualScale;
+        const viewport = renderer.coords.getViewport();
+        engine.autoEmit = false;
+        renderer.frames.length = 0;
+        await chart.setMarket({ data: empty ? [] : snapshotBars(10), preserveView: true });
+        const rerun = engine.runs[engine.runs.length - 1]!;
+        if (empty) rerun.handlers.onModel(rerun.model);
+        const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+        try { rerun.handlers.onError?.(new Error('local test failure')); } finally { errorLog.mockRestore(); }
+        expect(renderer.paint()).not.toContain('#13579b');
+        expect(renderer.paint()).not.toContain('#2468ac');
+        expect(renderer.frames.flat()).not.toContain('#13579b');
+        expect(renderer.frames.flat()).not.toContain('#2468ac');
+        expect(renderer.scene.panes.get('price')).toBe(pane);
+        expect(pane.manualScale).toBe(scale);
+        expect(renderer.coords.getViewport()).toEqual(viewport);
+        expect(chart.indicators().map(handle => handle.id)).toEqual(['snapshot']);
+        // An empty snapshot must not leave a future model waiting to reappear on refill.
+        if (empty) {
+            await chart.setMarket({ data: snapshotBars(10), preserveView: true });
+            expect(renderer.paint()).not.toContain('#13579b');
+            expect(renderer.frames.flat()).not.toContain('#13579b');
+        }
+        const current = engine.runs[engine.runs.length - 1]!;
+        current.handlers.onModel(current.model);
+        expect(renderer.paint()).toContain('#13579b');
+        expect(renderer.scene.indicators.get('snapshot')!.priceLines[0]!.price).toBe(109);
+    });
+
+    for (const empty of [false, true]) it(`clears native and chart-type payloads on ${empty ? 'empty' : 'retreat'} without reviving stopped hosts`, async () => {
+        const hosts: SeriesDataEngineHost[] = [];
+        registerChartType({ id: 'probe-style', dataEngine: () => ({ start: host => {
+            hosts.push(host);
+            if (hosts.length === 1) { host.pushData({ derived: 199 }); host.pushPending([[1, 2]]); }
+        }, suspend() {}, resume() {}, stop() {} }) });
+        const { descriptor, instances } = probeNative();
+        registerNativeIndicator(descriptor);
+        const renderer = new FakeRenderer(); renderer.priceStyleFeature = 'probe-style';
+        const chart = make({ symbol: 'AAA', timeframe: '60', data: snapshotBars(100), volume: false }, { renderer });
+        chart.addNativeIndicator('probe');
+        await chart.ready(); await flush();
+        instances[0]!.ctx!.pushData({ derived: 199 });
+        await chart.setMarket({ data: empty ? [] : snapshotBars(10), preserveView: true }); await flush();
+        const pushes = new Map(renderer.nativePushes);
+        expect(pushes.get('probe-style')).toBeUndefined();
+        expect(pushes.get('probe-style-pending')).toEqual([]);
+        expect(pushes.get('probe')).toBeUndefined();
+        const count = renderer.nativePushes.length;
+        hosts[0]!.pushData({ derived: 199 }); instances[0]!.ctx!.pushData({ derived: 199 });
+        expect(renderer.nativePushes).toHaveLength(count);
+    });
+});
+
+describe('deferred script run fences', () => {
+    it('fences a snapshot restart before the deferred context pull starts', async () => {
+        const engine = new SnapshotEngine(), runs: ScriptRun[] = [];
+        const chart = make({ symbol: 'AAA', timeframe: '60', data: snapshotBars(100), volume: false }, { renderer: new FakeRenderer(), engines: [engine] });
+        chart.on('script:run', run => runs.push(run));
+        chart.addIndicator('snapshot', { id: 'snapshot' });
+        await chart.ready(); await flush(); runs.length = 0;
+        const old = engine.runs[0]!, calls = old.contextCalls;
+        old.handlers.onModel(old.model);
+        await chart.setMarket({ data: snapshotBars(10), preserveView: true }); await flush();
+        expect(old.contextCalls).toBe(calls);
+        expect(runs).toHaveLength(1);
+        expect(runs[0]!.vars).toEqual({ length: 10 });
+    });
+
+    it('fences a replaced execution on the same record without a market change', async () => {
+        const engine = new SnapshotEngine(), runs: ScriptRun[] = [];
+        const chart = make({ symbol: 'AAA', timeframe: '60', data: snapshotBars(100), volume: false }, { renderer: new FakeRenderer(), engines: [engine] });
+        chart.on('script:run', run => runs.push(run));
+        const handle = chart.addIndicator('snapshot', { id: 'snapshot' });
+        await chart.ready(); await flush(); runs.length = 0;
+        let release!: () => void;
+        engine.holdContext = new Promise<void>(resolve => { release = resolve; });
+        engine.runs[0]!.handlers.onModel(engine.runs[0]!.model);
+        await flush();
+        expect((await handle.updateCode('replacement')).ok).toBe(true);
+        await flush(); release(); await flush();
+        expect(engine.runs).toHaveLength(2);
+        expect(runs).toHaveLength(1);
+        expect(await runs[0]!.series('last')).toHaveLength(100);
+    });
+
+    it('drops an old context across snapshot restart and keeps current callbacks usable', async () => {
+        const engine = new SnapshotEngine(), runs: ScriptRun[] = [];
+        const chart = make({ symbol: 'AAA', timeframe: '60', data: snapshotBars(100), volume: false }, { renderer: new FakeRenderer(), engines: [engine] });
+        chart.on('script:run', run => runs.push(run));
+        let release!: () => void;
+        engine.holdContext = new Promise<void>(resolve => { release = resolve; });
+        chart.addIndicator('snapshot', { id: 'snapshot' });
+        await chart.ready(); await flush();
+        expect(engine.runs[0]!.contextCalls).toBe(1);
+        await chart.setMarket({ data: snapshotBars(10), preserveView: true }); await flush();
+        expect(runs).toHaveLength(1);
+        const current = runs[0]!;
+        expect(current.vars).toEqual({ length: 10 }); expect(current.bar).toBe(9);
+        release(); await flush();
+        expect(runs).toHaveLength(1);
+        expect(await current.series('last')).toHaveLength(10);
+        expect(await current.trades()).toHaveLength(1);
+
+        let releaseSeries!: () => void;
+        engine.holdContext = new Promise<void>(resolve => { releaseSeries = resolve; });
+        const pendingSeries = current.series('last');
+        let releaseTrades!: () => void;
+        engine.holdContext = new Promise<void>(resolve => { releaseTrades = resolve; });
+        const pendingTrades = current.trades();
+        await chart.setMarket({ data: snapshotBars(5), preserveView: true }); await flush();
+        releaseSeries(); releaseTrades();
+        expect(await pendingSeries).toEqual([]); expect(await pendingTrades).toEqual([]);
+        const latest = engine.runs[engine.runs.length - 1]!, calls = latest.contextCalls;
+        expect(await current.series('last')).toEqual([]); expect(await current.trades()).toEqual([]);
+        expect(latest.contextCalls).toBe(calls);
+    });
+
+    for (const beforeMicrotask of [false, true]) it(`drops same-id replacement emissions ${beforeMicrotask ? 'before the context pull' : 'after the context await'}`, async () => {
+        const engine = new SnapshotEngine(), runs: ScriptRun[] = [];
+        const chart = make({ symbol: 'AAA', timeframe: '60', data: snapshotBars(100), volume: false }, { renderer: new FakeRenderer(), engines: [engine] });
+        chart.on('script:run', run => runs.push(run));
+        const handle = chart.addIndicator('snapshot', { id: 'same' });
+        await chart.ready(); await flush(); runs.length = 0;
+        let release!: () => void;
+        engine.holdContext = new Promise<void>(resolve => { release = resolve; });
+        const old = engine.runs[0]!, previousCalls = old.contextCalls;
+        old.handlers.onModel(old.model);
+        if (!beforeMicrotask) await flush();
+        handle.remove();
+        if (beforeMicrotask) engine.holdContext = null;
+        chart.addIndicator('replacement', { id: 'same' });
+        await flush(); release(); await flush();
+        expect(runs).toHaveLength(1);
+        expect(old.contextCalls).toBe(previousCalls + (beforeMicrotask ? 0 : 1));
+        expect(await runs[0]!.series('last')).toHaveLength(100);
+    });
+});
+
+describe('same-market offline snapshots', () => {
+    it('preserves the view, skips provider loads and identity events, and accepts an empty snapshot', async () => {
+        const feed = new SwitchFeed();
+        const renderer = new FakeRenderer();
+        const chart = make({ symbol: 'AAA', timeframe: '60', data: makeBars(20, 100), volume: false }, { renderer, dataFeed: feed });
+        await chart.ready();
+        const identities: unknown[] = [], loads: unknown[] = [];
+        chart.on('market:changed', e => identities.push(e));
+        chart.on('load:start', e => loads.push(e));
+        renderer.setBarsCalls.length = 0;
+        await chart.setMarket({ data: makeBars(21, 110), preserveView: true });
+        expect(renderer.setBarsCalls).toEqual([{ n: 21, close: 110, preserveView: true }]);
+        await chart.setMarket({ data: [], preserveView: true });
+        expect(renderer.bars).toEqual([]);
+        expect(chart.latestBar).toBeNull();
+        expect(chart.market.offline).toBe(true);
+        expect(feed.loads).toEqual([]);
+        expect(identities).toEqual([]);
+        expect(loads).toEqual([]);
+    });
+
+    it('rejects preserving data across an identity or source change before mutating the chart', async () => {
+        const chart = make({ symbol: 'AAA', timeframe: '60', data: makeBars(20, 100), volume: false }, { renderer: new FakeRenderer(), dataFeed: new SwitchFeed() });
+        await chart.ready();
+        for (const next of [{ symbol: 'BBB', data: [] }, { timeframe: '5', data: [] }, { session: 'extended' as const, data: [] }, {}]) {
+            await expect(chart.setMarket({ ...next, preserveView: true })).rejects.toThrow('current offline market');
+        }
+        expect(chart.market).toMatchObject({ symbol: 'AAA', timeframe: '60', offline: true });
+        expect(chart.latestBar?.close).toBe(100);
+    });
+
+    it('supersedes consumers, revokes stale hosts, and restarts scripts/natives/type engines over the newest snapshot', async () => {
+        const hosts: SeriesDataEngineHost[] = [];
+        registerChartType({ id: 'probe-style', dataEngine: () => ({ start: host => { hosts.push(host); }, suspend() {}, resume() {}, stop() {} }) });
+        const { descriptor, instances } = probeNative();
+        registerNativeIndicator(descriptor);
+        const renderer = new FakeRenderer(); renderer.priceStyleFeature = 'probe-style';
+        const engine = new RecordingEngine();
+        const callbacks: ExecutionHandlers[] = [];
+        const execute = engine.execute.bind(engine);
+        engine.execute = (request, handlers) => { callbacks.push(handlers); return execute(request, handlers); };
+        const chart = make({ symbol: 'AAA', timeframe: '60', data: makeBars(20, 100), volume: false }, { renderer, engines: [engine], dataFeed: new SwitchFeed() });
+        chart.addIndicator('synthetic'); chart.addNativeIndicator('probe');
+        await chart.ready(); await flush();
+        const oldHost = hosts[0]!, oldNative = instances[0]!.ctx!;
+        const oldScript = callbacks[0]!, oldModel = renderer.mountedModels[0]!;
+        const beforeRuns = engine.executions.length;
+        renderer.nativePushes.length = 0;
+        const first = chart.setMarket({ data: makeBars(21, 110), preserveView: true });
+        oldHost.pushData({ stale: true }); oldHost.pushPending([[1, 2]]);
+        const models = renderer.mountedModels.length;
+        oldNative.emit({});
+        oldScript.onModel({ ...oldModel, title: 'Stale snapshot' });
+        expect(renderer.mountedModels).toHaveLength(models);
+        expect(renderer.updates).toEqual([]);
+        expect(renderer.nativePushes).toEqual([]);
+        const second = chart.setMarket({ data: makeBars(22, 120), preserveView: true });
+        await Promise.all([first, second]); await flush();
+        expect(engine.executions.slice(beforeRuns)).toEqual([{ symbol: 'AAA', timeframe: '60', barClose: 120 }]);
+        const latestNativeBars = instances[instances.length - 1]!.ctx!.bars();
+        expect(latestNativeBars).toHaveLength(22);
+        expect(latestNativeBars[latestNativeBars.length - 1]?.close).toBe(120);
+        expect(hosts[hosts.length - 1]!.bars()).toHaveLength(22);
+        oldHost.pushData({ stale: 'after' }); oldNative.emit({});
+        oldScript.onModel({ ...oldModel, title: 'Stale snapshot' });
+        expect(renderer.nativePushes).toEqual([]);
+        expect(renderer.mountedModels[renderer.mountedModels.length - 1]?.title).not.toBe('Stale snapshot');
+        expect(chart.latestBar?.close).toBe(120);
+    });
+
+    it('replaces an internal replay with the host snapshot without restoring hidden future bars', async () => {
+        const renderer = new FakeRenderer();
+        const chart = make({ symbol: 'AAA', timeframe: '60', data: makeBars(100, 100), volume: false }, { renderer, dataFeed: new SwitchFeed() });
+        await chart.ready();
+        const replayBars = makeBars(20, 100);
+        await chart.replay.start({ from: replayBars[replayBars.length - 1]!.time });
+        expect(chart.replay.state.active).toBe(true);
+        const snapshotBars = makeBars(21, 100);
+        await chart.setMarket({ data: snapshotBars, preserveView: true });
+        expect(chart.replay.state.active).toBe(false);
+        expect(renderer.bars).toHaveLength(21);
+        chart.replay.stop();
+        expect(renderer.bars).toHaveLength(21);
+        expect(chart.latestBar?.time).toBe(snapshotBars[snapshotBars.length - 1]!.time);
+    });
 });
 
 describe('setMarket — in-place market switch', () => {

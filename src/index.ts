@@ -10,6 +10,7 @@ export { NativeRenderer } from './renderers/native/NativeRenderer';
 // shared bar (dock:'static') and routes it to the active chart's `chart.drawings`.
 export { DrawingToolbar, type DrawingToolbarOptions } from './renderers/native/drawings/DrawingToolbar';
 export type { ChartConfig, ChartStyle } from './renderers/native/core/chartConfig';
+export type { RightOffsetConvention } from './renderers/native/core/ViewportState';
 export type { BackgroundGradient } from './renderers/native/core/background';
 export { MultiProviderFeed } from './data/MultiProviderFeed';
 export { CachingDataFeed } from './data/CachingDataFeed';

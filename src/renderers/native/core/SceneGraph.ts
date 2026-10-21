@@ -132,6 +132,8 @@ export interface IndicatorScale {
 export class SceneGraph {
     readonly panes = new Map<string, PaneNode>();
     readonly indicators = new Map<string, IndicatorModel>();
+    /** Accepted indicator mutations invalidate backend color caches, including in-place array edits. */
+    barColorsRevision = 0;
     bars: OHLCV[] = [];
     /** Volume-layer config pushed by the volume native indicator (null ⇒ layer off). Ephemeral. */
     volumeLayer: VolumeLayerData | null = null;

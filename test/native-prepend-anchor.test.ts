@@ -46,11 +46,13 @@ describe('setBars(preserveView) shifts logical interaction anchors on prepend', 
         expect(anyR.zoomAnchorLogical).toBe(42);
     });
 
-    it('an append-only update (no prepend) shifts nothing', () => {
+    it('an append carries a following zoom anchor with the newest edge', () => {
         const { r, anyR } = makeRenderer();
         r.setBars(mkBars(100, 1_000_000));
         anyR.zoomAnchorLogical = 42;
+        const before = anyR.anchoredRightOffset(50);
         r.setBars([...mkBars(100, 1_000_000), ...mkBars(5, 1_100_000)], { preserveView: true });
-        expect(anyR.zoomAnchorLogical).toBe(42); // head unchanged → shift 0
+        expect(anyR.zoomAnchorLogical).toBe(47);
+        expect(anyR.anchoredRightOffset(50)).toBeCloseTo(before, 9);
     });
 });

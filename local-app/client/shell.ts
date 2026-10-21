@@ -43,8 +43,8 @@ export function buildReplayShell(): string {
             .replace('Your next session starts here.', 'Vela Replay')
             .replace('Replay a futures contract at your pace.<br>Build consistency, one decision at a time.', 'Open a saved session or create a new one.')
             .replace('<button class="primary" data-action="new-session">', '<button class="quiet" data-action="sessions">Saved sessions</button><button class="primary" data-action="new-session">');
-        return `<section id="standard-workspace" aria-label="Vela chart workspace">${chart}</section>
-            <section id="session-manager" aria-label="Replay session manager" hidden>${parts.before}${parts.after}<div id="replay-home" hidden></div><div id="trade-home" hidden></div></section>${parts.overlays}`;
+        return `<section id="standard-workspace" aria-label="Vela chart workspace" hidden><span id="workspace-mode-note" class="sr-only" role="status"></span>${chart}</section>
+            <section id="session-manager" aria-label="Backtesting dashboard"><div id="session-dashboard"></div><button id="dashboard-reload" class="primary" data-action="reload" hidden style="position:fixed;bottom:24px;right:24px;z-index:10">Reload workspace</button><div class="session-shared-controls" hidden>${parts.before}${parts.after}<div id="replay-home" hidden></div><div id="trade-home" hidden></div></div></section>${parts.overlays}`;
     }
 
 export function managementShell(): string {

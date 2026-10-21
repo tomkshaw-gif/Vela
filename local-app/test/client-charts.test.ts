@@ -332,7 +332,7 @@ describe('replay chart public seam', () => {
             expect(workspace.options.bottombar).toBeUndefined();
             expect(workspace.options.topbar).toEqual({
                 left: ['symbol', 'timeframes', 'style', 'indicators', 'local.templatesShortcut', 'alerts', 'local.replayToggle', 'undo-redo'],
-                right: ['layout', 'local.fullscreen', 'screenshot', 'local.tradeShortcut', 'local.sessions', 'panels'],
+                right: ['local.chart-mode', 'local.backtest-mode', 'layout', 'local.fullscreen', 'screenshot', 'local.tradeShortcut', 'local.sessions', 'panels'],
             });
         } finally { controller.destroy(); }
     });

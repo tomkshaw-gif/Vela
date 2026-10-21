@@ -251,6 +251,11 @@ export async function createReplayServer(options: ServerOptions = {}) {
                     const { startTime, ...remaining } = rawConfig;
                     resolvedConfig = { ...remaining, startIndex: store.resolveTime(dataset.id, startTime).index };
                 }
+                if (Object.hasOwn(rawConfig, 'endTime')) {
+                    if (Object.hasOwn(rawConfig, 'endIndex')) throw new AppError(400, 'Supply either a replay end date and time or an end index, not both.');
+                    const { endTime, ...remaining } = resolvedConfig;
+                    resolvedConfig = { ...remaining, endIndex: store.resolveEndTime(dataset.id, endTime) };
+                }
                 const config = validateSessionConfig(resolvedConfig, dataset.barCount); send(response, 200, view(store.createSession(createSession(config, dataset.instrument)))); return;
             }
             const match = /^\/api\/sessions\/([a-f0-9-]{36})(?:\/(command|clone|chart|series|analytics|monte-carlo|export|navigation))?$/.exec(path);
@@ -327,7 +332,10 @@ export async function createReplayServer(options: ServerOptions = {}) {
                     if (command.type === 'advance') integer(command.count, 1, 5000, 'advance count');
                     if (command.type === 'advanceTo') {
                         const target = integer(command.time, 0, 8_640_000_000_000_000, 'target time');
-                        let low = Math.max(0, session.cursor + 1); let high = bars.length;
+                        const config = validateSessionConfig(session.config, bars.length);
+                        const endIndex = config.endIndex ?? bars.length;
+                        integer(session.cursor, config.startIndex - 1, endIndex - 1, 'cursor');
+                        let low = Math.max(0, session.cursor + 1); let high = endIndex;
                         while (low < high) { const middle = Math.floor((low + high) / 2); if (bars[middle]!.time <= target) low = middle + 1; else high = middle; }
                         if (low - session.cursor - 1 > 5000) throw new AppError(400, 'Advance is limited to 5,000 source bars per request.');
                     }

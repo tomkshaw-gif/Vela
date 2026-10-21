@@ -24,7 +24,10 @@ export interface PineEditorOptions {
 }
 export interface PineBacktestContext { instanceId: string | null }
 export interface PineEditorOpenOptions { source?: string; id?: string; name?: string; instanceId?: string }
-export interface PineEditor { open(options?: PineEditorOpenOptions): void; flush(): Promise<void>; destroy(): void }
+export interface PineEditor {
+    /** False when a pending action or draft protection refused the request; document loads are asynchronous. */
+    open(options?: PineEditorOpenOptions): boolean; flush(): Promise<void>; destroy(): void;
+}
 
 export { PINE_EDITOR_STORAGE_KEY };
 const DRAFT_LIMIT = 250_000;
@@ -73,14 +76,23 @@ const pineLanguage = StreamLanguage.define({
 interface Draft {
     key: string; name: string; source: string; document: ScriptDocument | null;
     dirty: boolean; updatedAt: number; baselineMissing?: boolean;
+    view?: DraftView;
 }
-interface StoredEditor { version: 1; activeKey: string; drafts: Draft[]; favorites: string[]; recent: string[] }
+interface DraftView { anchor: number; head: number; scrollTop: number; scrollLeft: number }
+interface DocumentView { id: string; revision: number; sourceLength: number; view: DraftView }
+interface StoredEditor { version: 1; activeKey: string; drafts: Draft[]; favorites: string[]; recent: string[]; documentViews?: DocumentView[] }
 interface LogEntry { message: string; level: 'info' | 'error' | 'warning'; line?: number; column?: number }
 
 function element<K extends keyof HTMLElementTagNameMap>(tag: K, className = '', text = ''): HTMLElementTagNameMap[K] {
     const node = document.createElement(tag); node.className = className; node.textContent = text; return node;
 }
 function draftKey(): string { return globalThis.crypto?.randomUUID?.() ?? `draft-${Date.now()}-${Math.random().toString(36).slice(2)}`; }
+function draftView(value: unknown, length: number): DraftView {
+    const item = value && typeof value === 'object' ? value as Partial<DraftView> : {};
+    const position = (offset: unknown): number => typeof offset === 'number' && Number.isFinite(offset) ? Math.max(0, Math.min(length, Math.trunc(offset))) : 0;
+    const scroll = (offset: unknown): number => typeof offset === 'number' && Number.isFinite(offset) ? Math.max(0, Math.min(10_000_000, offset)) : 0;
+    return { anchor: position(item.anchor), head: position(item.head), scrollTop: scroll(item.scrollTop), scrollLeft: scroll(item.scrollLeft) };
+}
 function readStorage(key = PINE_EDITOR_STORAGE_KEY): StoredEditor | null {
     try {
         let raw = localStorage.getItem(key);
@@ -93,6 +105,7 @@ function readStorage(key = PINE_EDITOR_STORAGE_KEY): StoredEditor | null {
             if (!draft || typeof draft.key !== 'string' || typeof draft.name !== 'string' || draft.name.length > 200
                 || typeof draft.source !== 'string' || typeof draft.dirty !== 'boolean' || !Number.isFinite(draft.updatedAt)) return null;
             length += draft.source.length;
+            draft.view = draftView(draft.view, draft.source.length);
             if (draft.document && (typeof draft.document.id !== 'string' || typeof draft.document.source !== 'string'
                 || typeof draft.document.name !== 'string' || !Number.isSafeInteger(draft.document.revision) || draft.document.revision < 0)) return null;
             if (draft.document && draft.baselineMissing && !draft.dirty) {
@@ -102,6 +115,9 @@ function readStorage(key = PINE_EDITOR_STORAGE_KEY): StoredEditor | null {
         if (length > DRAFT_LIMIT) return null;
         stored.favorites = Array.isArray(stored.favorites) ? stored.favorites.filter(id => typeof id === 'string').slice(0, 500) : [];
         stored.recent = Array.isArray(stored.recent) ? stored.recent.filter(id => typeof id === 'string').slice(0, 30) : [];
+        stored.documentViews = Array.isArray(stored.documentViews) ? stored.documentViews.slice(-100).filter(item => item && typeof item.id === 'string' && item.id.length <= 128
+            && Number.isSafeInteger(item.revision) && item.revision >= 0 && Number.isSafeInteger(item.sourceLength) && item.sourceLength >= 0 && item.sourceLength <= SOURCE_LIMIT)
+            .map(item => ({ id: item.id, revision: item.revision, sourceLength: item.sourceLength, view: draftView(item.view, item.sourceLength) })) : [];
         return stored;
     } catch { return null; }
 }
@@ -128,6 +144,7 @@ export function mountPineEditor(host: HTMLElement, options: PineEditorOptions): 
     };
     let favorites = restored?.favorites ?? [];
     let recent = restored?.recent ?? [];
+    let documentViews = restored?.documentViews ?? [];
     let instanceId: string | null = null;
     let appliedSource: string | null = null;
     let editSerial = 0; let session = 0; let librarySerial = 0; let panelSerial = 0; let loadSerial = 0;
@@ -203,6 +220,12 @@ export function mountPineEditor(host: HTMLElement, options: PineEditorOptions): 
     function dirty(): boolean { return current.document ? Boolean(current.baselineMissing) || source() !== current.document.source || current.name !== current.document.name : current.dirty; }
     function syncDraft(): void {
         current.source = source(); current.dirty = dirty(); current.updatedAt = Date.now();
+        const selection = view.state.selection.main;
+        current.view = draftView({ anchor: selection.anchor, head: selection.head, scrollTop: view.scrollDOM.scrollTop, scrollLeft: view.scrollDOM.scrollLeft }, current.source.length);
+        if (current.document && !current.dirty) {
+            documentViews = [...documentViews.filter(item => item.id !== current.document!.id),
+                { id: current.document.id, revision: current.document.revision, sourceLength: current.source.length, view: current.view }].slice(-100);
+        }
         drafts = drafts.filter(draft => draft.key !== current.key && draft.dirty);
         drafts.push(current);
     }
@@ -216,7 +239,7 @@ export function mountPineEditor(host: HTMLElement, options: PineEditorOptions): 
                     revision: draft.document.revision, versions: draft.document.versions, archived: draft.document.archived,
                     createdAt: draft.document.createdAt, updatedAt: draft.document.updatedAt, source: '' } : null,
             }));
-            localStorage.setItem(storageKey, JSON.stringify({ version: 1, activeKey: current.key, drafts: storedDrafts, favorites, recent } satisfies StoredEditor));
+            localStorage.setItem(storageKey, JSON.stringify({ version: 1, activeKey: current.key, drafts: storedDrafts, favorites, recent, documentViews } satisfies StoredEditor));
             storageFailed = false; return true;
         } catch {
             if (!storageFailed) { storageFailed = true; addLog({ level: 'warning', message: 'Local draft storage is unavailable. Keep this tab open and save or export your code before reloading.' }); }
@@ -301,7 +324,16 @@ export function mountPineEditor(host: HTMLElement, options: PineEditorOptions): 
             if (update.docChanged || update.selectionSet) render();
         }),
     ];
-    const view = new EditorView({ parent: codeHost, state: EditorState.create({ doc: current.source, extensions }) });
+    function editorState(draft: Draft): EditorState {
+        const selection = draftView(draft.view, draft.source.length);
+        return EditorState.create({ doc: draft.source, selection: { anchor: selection.anchor, head: selection.head }, extensions });
+    }
+    function restoreScroll(draft: Draft): void {
+        const saved = draftView(draft.view, draft.source.length);
+        view.scrollDOM.scrollTop = saved.scrollTop; view.scrollDOM.scrollLeft = saved.scrollLeft;
+    }
+    const view = new EditorView({ parent: codeHost, state: editorState(current) });
+    restoreScroll(current);
 
     async function execute(action: 'run' | 'add' | 'backtest' | 'remove'): Promise<void> {
         if (pending || loading || destroyed) return;
@@ -364,7 +396,7 @@ export function mountPineEditor(host: HTMLElement, options: PineEditorOptions): 
     function replace(next: Draft, linked?: string): void {
         session++; editSerial++; loadSerial++; loading = false; current = next; instanceId = linked ?? null; appliedSource = linked ? next.source : null;
         replacing = true;
-        view.setState(EditorState.create({ doc: next.source, extensions }));
+        view.setState(editorState(next)); restoreScroll(next);
         replacing = false;
         status = next.dirty ? 'Draft restored' : 'Ready'; sideMode = null; sidebar.hidden = true; panelSerial++;
         persist(); render(); view.focus();
@@ -388,6 +420,7 @@ export function mountPineEditor(host: HTMLElement, options: PineEditorOptions): 
             if (!canSwitch(code, reusable?.key)) return;
             replace({ key: reusable?.key ?? draftKey(), name: (input?.name ?? reusable?.name ?? saved.name).slice(0, 200), source: code,
                 document: reusable?.document ?? saved, baselineMissing: reusable?.baselineMissing,
+                view: reusable?.view ?? (code === saved.source ? documentViews.find(item => item.id === id && item.revision === saved.revision && item.sourceLength === code.length)?.view : undefined),
                 dirty: code !== saved.source || Boolean(reusable?.dirty), updatedAt: Date.now() }, input?.instanceId);
             if (input?.instanceId && input.source === undefined) { appliedSource = null; render(); }
             touchRecent(id); persist();
@@ -560,12 +593,14 @@ export function mountPineEditor(host: HTMLElement, options: PineEditorOptions): 
     render(); persist();
     return {
         open(input) {
-            if (destroyed) return; host.hidden = false; root.hidden = false; view.requestMeasure();
-            if (!input || input.id === undefined && input.source === undefined) { view.focus(); return; }
-            if (input.id) { void loadScript(input.id, input); return; }
-            if (pending || loading) return;
+            if (destroyed) return false; host.hidden = false; root.hidden = false; view.requestMeasure();
+            if (!input || input.id === undefined && input.source === undefined) { view.focus(); return true; }
+            if (input.id) { if (pending) return false; void loadScript(input.id, input); return true; }
+            if (pending || loading) return false;
             const code = input.source ?? PINE_INDICATOR_EXAMPLE;
-            if (canSwitch(code)) replace({ key: draftKey(), name: (input.name ?? 'Untitled script').slice(0, 200), source: code, document: null, dirty: true, updatedAt: Date.now() }, input.instanceId);
+            if (!canSwitch(code)) return false;
+            replace({ key: draftKey(), name: (input.name ?? 'Untitled script').slice(0, 200), source: code, document: null, dirty: true, updatedAt: Date.now() }, input.instanceId);
+            return true;
         },
         async flush() { nameDialog?.cancel(); if (!persist() && !destroyed) throw new Error('Unable to persist the Pine editor draft. Save or export your code before reloading.'); },
         destroy() {

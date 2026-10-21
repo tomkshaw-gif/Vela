@@ -55,6 +55,127 @@ function deferredCommand() {
 }
 
 describe('simulated chart order lines', () => {
+    it.each(['draft', 'working'] as const)('offers release-only exit drags on a %s limit for either side', stage => {
+        for (const side of ['buy', 'sell'] as const) for (const kind of ['takeProfit', 'stopLoss'] as const) {
+            const f = fixture(); f.state().session.orders[0]!.side = side;
+            if (stage === 'draft') f.preview({ type: 'limit', side, qty: 2, price: 150 }); else f.refresh();
+            const key = stage === 'draft' ? 'draft' : 'order:pending-fixture';
+            const selector = `[data-order-line="${key}"] [data-order-add-exit="${kind}"]`;
+            expect(f.host.querySelector<HTMLButtonElement>(selector)?.hidden).toBe(false);
+            const higher = side === 'buy' ? kind === 'takeProfit' : kind === 'stopLoss';
+            const y = higher ? 90.2 : 210.2, price = higher ? 180 : 120;
+            f.fire(selector, 'pointerdown'); f.fire(selector, 'pointermove', y);
+            expect(f.command).not.toHaveBeenCalled(); expect(f.selectBracket).not.toHaveBeenCalled();
+            expect(f.host.querySelector(`[data-order-price="${key}"]`)?.textContent).toBe('150.00');
+            expect(f.host.querySelector(`[data-order-price="projection:${kind}"]`)?.textContent).toBe(price.toFixed(2));
+            f.fire(selector, 'pointerup', y);
+            if (stage === 'draft') {
+                expect(f.selectBracket).toHaveBeenCalledExactlyOnceWith(kind, price);
+                expect(f.selectPrice).not.toHaveBeenCalled(); expect(f.command).not.toHaveBeenCalled();
+            } else expect(f.command).toHaveBeenCalledExactlyOnceWith({ type: 'amend', orderId: 'pending-fixture', [kind]: price }, 'line-fixture', 0);
+        }
+    });
+
+    it.each(['existing', 'changed', 'removed', 'cancelled'] as const)('preserves a working limit when an exit becomes %s during a drag', change => {
+        const f = fixture(); const selector = '[data-order-line="order:pending-fixture"] [data-order-add-exit=takeProfit]';
+        if (change === 'existing') { f.state().session.orders[0]!.takeProfit = 180; f.refresh(); }
+        expect(f.host.querySelector<HTMLButtonElement>(selector)?.hidden).toBe(change === 'existing');
+        f.fire(selector, 'pointerdown'); f.fire(selector, 'pointermove', 90);
+        if (change === 'changed') f.state().session.orders[0]!.takeProfit = 190;
+        if (change === 'removed') f.state().session.orders.length = 0;
+        if (change === 'cancelled') f.state().session.orders[0]!.status = 'cancelled';
+        f.fire('.local-chart-orders', 'pointerup', 90);
+        expect(f.command).not.toHaveBeenCalled();
+    });
+
+    it('retains a newer draft exit set while its chart drag is pending', () => {
+        const f = fixture(); f.preview({ type: 'limit', side: 'buy', qty: 1, price: 150 });
+        const selector = '[data-order-line=draft] [data-order-add-exit=stopLoss]';
+        f.fire(selector, 'pointerdown'); f.fire(selector, 'pointermove', 210);
+        f.preview({ type: 'limit', side: 'buy', qty: 1, price: 150, stopLoss: 130 });
+        f.fire('.local-chart-orders', 'pointerup', 210);
+        expect(f.selectBracket).not.toHaveBeenCalled(); expect(f.command).not.toHaveBeenCalled();
+    });
+
+    it.each(['takeProfit', 'stopLoss'] as const)('adds a missing position %s only after a tick-aligned drag finishes', kind => {
+        const f = fixture();
+        f.state().session.position = { side: 'buy', qty: 2, avgPrice: 150, entryTime: 0, entryFees: 0, mae: 0, mfe: 0 };
+        f.refresh(); const selector = `[data-order-line=position] [data-order-add-exit="${kind}"]`;
+        expect(f.host.querySelector(selector)).not.toBeNull();
+        const y = kind === 'takeProfit' ? 90.2 : 210.2;
+        f.fire(selector, 'pointerdown'); f.fire(selector, 'pointermove', y);
+        expect(f.command).not.toHaveBeenCalled(); expect(f.state().session.position![kind]).toBeUndefined();
+        expect(f.host.querySelector('[data-order-price=position]')?.textContent).toBe('150.00');
+        expect(f.host.querySelector(`[data-order-price="projection:${kind}"]`)?.textContent).toBe(kind === 'takeProfit' ? '180.00' : '120.00');
+        f.fire(selector, 'pointerup', y);
+        expect(f.command).toHaveBeenCalledExactlyOnceWith({ type: 'amend', [kind]: kind === 'takeProfit' ? 180 : 120 }, 'line-fixture', 0);
+    });
+
+    it.each(['escape', 'cancel', 'stale', 'revision', 'position', 'blocked', 'unchanged'] as const)('does not add an exit after %s interrupts its preview', change => {
+        const f = fixture();
+        f.state().session.position = { side: 'sell', qty: 1, avgPrice: 150, entryTime: 0, entryFees: 0, mae: 0, mfe: 0 };
+        f.refresh(); const selector = '[data-order-line=position] [data-order-add-exit=takeProfit]';
+        expect(f.host.querySelector(selector)).not.toBeNull();
+        f.fire(selector, 'pointerdown'); if(change !== 'unchanged') f.fire(selector, 'pointermove', 210);
+        if(change==='escape') f.host.querySelector(selector)!.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
+        if(change==='cancel') f.fire(selector,'pointercancel');
+        if(change==='stale') f.stale(); if(change==='revision') f.state().session.revision++;
+        if(change==='position') f.state().session.position=null; if(change==='blocked') f.block();
+        f.fire('.local-chart-orders','pointerup',210);
+        expect(f.command).not.toHaveBeenCalled(); expect(f.host.querySelector('[data-order-price="projection:takeProfit"]')).toBeNull();
+    });
+
+    it('offers only missing exits and keeps settled projection controls inert', async () => {
+        const f = fixture(); f.state().session.position = { side:'buy',qty:1,avgPrice:150,entryTime:0,entryFees:0,mae:0,mfe:0,stopLoss:120 };
+        f.refresh(); expect(f.host.querySelector<HTMLButtonElement>('[data-order-line=position] [data-order-add-exit=stopLoss]')?.hidden).toBe(true);
+        const pending=deferredCommand();f.command.mockReturnValue(pending.promise);
+        const selector = '[data-order-line=position] [data-order-add-exit=takeProfit]';
+        f.fire(selector,'pointerdown');f.fire(selector,'pointermove',90);f.fire(selector,'pointerup',90);
+        expect(f.host.querySelector('[data-order-price="projection:takeProfit"]')).not.toBeNull();
+        expect(f.host.querySelector<HTMLButtonElement>(selector)?.disabled).toBe(true);
+        pending.reject(new Error('Owned rejection')); await pending.promise.catch(()=>undefined); await Promise.resolve();
+        expect(f.host.querySelector('[data-order-price="projection:takeProfit"]')).toBeNull();
+        expect(f.state().session.position!.takeProfit).toBeUndefined();
+    });
+
+    it.each([{ name: 'light', theme: LIGHT_THEME }, { name: 'dark', theme: DARK_THEME }])('distinguishes unplaced entry lines and borders on the $name plot', ({ theme }) => {
+        const f = fixture(); const dashes: number[][] = [];
+        const context = { setTransform() {}, clearRect() {}, setLineDash(dash: number[]) { dashes.push([...dash]); }, beginPath() {}, moveTo() {}, lineTo() {}, stroke() {} };
+        vi.spyOn(f.canvas, 'getContext').mockReturnValue(context as unknown as CanvasRenderingContext2D);
+        f.args.theme = theme; f.preview({ type: 'limit', side: 'buy', qty: 1, price: 160 });
+        expect(dashes).toEqual([[4, 4], [1, 2]]);
+        const style = document.createElement('style'); style.textContent = readFileSync('local-app/client/chart-order-lines.css', 'utf8');
+        document.head.append(style); cleanups.push(() => style.remove());
+        expect(getComputedStyle(f.host.querySelector('[data-order-line=draft] .local-order-body')!).borderTopStyle).toBe('dotted');
+        expect(getComputedStyle(f.host.querySelector('[data-order-price=draft]')!).borderTopStyle).toBe('dotted');
+        expect(getComputedStyle(f.host.querySelector('[data-order-line="order:pending-fixture"] .local-order-body')!).borderTopStyle).not.toBe('dotted');
+    });
+
+    it.each(['close', 'reverse'] as const)('routes a position %s through the current revision command seam', action => {
+        const f = fixture();
+        f.state().session.position = { side: 'buy', qty: 2, avgPrice: 150, entryTime: 0, entryFees: 0, mae: 0, mfe: 0 };
+        f.refresh();
+        const selector = action === 'close' ? '[data-order-close=position]' : '[data-order-reverse=position]';
+        const down = vi.fn(); const up = vi.fn(); f.host.addEventListener('pointerdown', down); f.host.addEventListener('pointerup', up);
+        f.fire(selector, 'pointerdown'); f.fire(selector, 'pointerup'); f.fire(selector, 'click');
+        expect(f.command).toHaveBeenCalledExactlyOnceWith({ type: action }, 'line-fixture', 0);
+        expect(down).not.toHaveBeenCalled(); expect(up).not.toHaveBeenCalled();
+        expect(f.state().session.position?.qty).toBe(2);
+        f.block(); f.refresh(); f.command.mockClear(); f.fire(selector, 'click');
+        expect(f.command).not.toHaveBeenCalled();
+    });
+
+    it('ignores position controls after their position disappears or their chart becomes stale', () => {
+        const f = fixture();
+        f.state().session.position = { side: 'sell', qty: 1, avgPrice: 150, entryTime: 0, entryFees: 0, mae: 0, mfe: 0 };
+        f.refresh(); f.state().session.position = null;
+        f.fire('[data-order-close=position]', 'click'); f.fire('[data-order-reverse=position]', 'click');
+        expect(f.command).not.toHaveBeenCalled();
+        f.state().session.position = { side: 'buy', qty: 1, avgPrice: 150, entryTime: 0, entryFees: 0, mae: 0, mfe: 0 };
+        f.stale(); f.fire('[data-order-close=position]', 'click'); f.fire('[data-order-reverse=position]', 'click');
+        expect(f.command).not.toHaveBeenCalled();
+    });
+
     it('uses the actual plot surface for bodies and axis tags inside an independently themed shell', () => {
         let surface = '#ffffff'; const f = fixture(() => surface);
         f.host.style.setProperty('--vela-surface', '#080808');
@@ -134,7 +255,7 @@ describe('simulated chart order lines', () => {
         expect(chartOrderLines(view).map(item => item.kind)).toEqual(['order', 'position', 'takeProfit', 'stopLoss']);
         expect(f.host.querySelectorAll('[data-order-line]')).toHaveLength(4);
         expect(f.host.querySelectorAll('[data-order-cancel]')).toHaveLength(1);
-        expect(f.host.querySelector('[data-order-line=position] button')?.hasAttribute('disabled')).toBe(true);
+        expect(f.host.querySelector('[data-order-drag=position]')?.hasAttribute('disabled')).toBe(true);
     });
 
     it('previews a tick-aligned drag without changing state and amends only on release', () => {

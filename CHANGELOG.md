@@ -6,6 +6,10 @@ All notable changes to Vela, newest first.
 
 ### Added
 
+- **Backtesting home.** Start on a dashboard of saved sessions and account totals.
+  Search and filter attempts, resume a session, or open the standard chart view.
+  New sessions choose a cached contract and a start/end date range that replay
+  enforces.
 - **Windows desktop application.** Open the installed workspace from Run Vela,
   keep Develop Vela for fast local edits, and receive saved-workspace updates from
   the fork's stable releases. Sessions, cached candles, private appearance and
@@ -21,6 +25,7 @@ All notable changes to Vela, newest first.
   performance, trades and simulations, then save or export a reproducible run.
   Deep Backtesting selects a separate cached date range without advancing replay.
 - **Reusable chart templates.** Save indicator sets, chart appearance and layouts.
+  Favorite setups and recently applied templates stay within reach.
   Native custom intervals, synchronization and grids up to sixteen charts remain
   available alongside the compact editor and results dock.
 - **Local AI chart connection.** Connect an MCP-capable assistant to read revealed
@@ -52,7 +57,9 @@ All notable changes to Vela, newest first.
 - **Compact simulated order ticket.** Select a side, switch between market, limit
   and stop orders, adjust prices by instrument ticks and enable protective exits
   before submitting one described order. Preview or amend working entry and exit
-  prices directly on the chart; release commits and Escape cancels a drag.
+  prices directly on the chart; release commits and Escape cancels a drag. Add a
+  missing draft, working-order or position exit by dragging its TP or SL control,
+  or close/reverse the position through the same simulated order flow.
 - **Sharper candle rendering.** Both native backends support nonlinear candle
   widths and device-pixel-aligned bodies, borders and wicks. The local light
   preset uses 12-pixel axis text while retaining custom appearances.
@@ -74,6 +81,20 @@ All notable changes to Vela, newest first.
   application runs on localhost and keeps credentials out of browser responses.
 
 ### Fixed
+
+- **Stable replay framing.** Advancing historical candles keeps your zoom, right
+  margin and manual price scales. Wide charts zoom in consistently, and dragging
+  a price scale tracks the pointer accurately.
+- **Quicker crosshair feedback.** Cursor-only updates no longer wait for ongoing
+  chart animations. Candle and axis changes still render together.
+- **Safer order and script edits.** Rejected orders keep their drafts without a
+  success message. Pending saves preserve newer edits, and scripts stay linked
+  to the chart and session that own them. Report controls retain keyboard focus.
+- **Unambiguous replay times.** Repeated daylight-saving hours offer an explicit
+  UTC offset in session starts and date navigation. Missing local times are
+  rejected, and editor recovery restores the saved text selection and scroll.
+- **Smoother indicator rendering.** Panning and zooming reuse unchanged candle
+  colors instead of rebuilding the full indicator color history on every frame.
 
 - Cached replay OHLC values remain available after loading, replacing data and
   leaving the plot. Indicators report synchronous execution errors instead of

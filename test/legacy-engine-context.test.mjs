@@ -3,13 +3,13 @@ import { Vela } from '../src/Vela';
 import { DemoEngine } from '../playground/demo-engine';
 
 const BASE = Date.UTC(2024, 3, 8);
-const bars = Array.from({ length: 6 }, (_, index) => ({ time: BASE + index * 60000, open: 100 + index,
-    high: 102 + index, low: 99 + index, close: 100 + index, volume: 10 }));
 const source = 'title Public port\noverlay true\ninput length = 3\nplot sma(close, length) "Average"';
 const charts = [];
 afterEach(() => { charts.splice(0).forEach(chart => chart.destroy()); });
 
 async function fixture(engine = new DemoEngine()) {
+    const bars = Array.from({ length: 6 }, (_, index) => ({ time: BASE + index * 60000, open: 100 + index,
+        high: 102 + index, low: 99 + index, close: 100 + index, volume: 10 }));
     let push;
     let viewport;
     let range = { from: BASE, to: bars.at(-1).time };
@@ -25,12 +25,12 @@ async function fixture(engine = new DemoEngine()) {
     charts.push(chart); await chart.ready();
     const handle = chart.addIndicator(source, { language: 'demo' });
     await vi.waitFor(async () => expect((await handle.context())?.plots.Average?.at(-1)?.value).toBe(104));
-    return { chart, handle, tick: bar => push?.(bar) };
+    return { chart, handle, bars, tick: bar => push?.(bar) };
 }
 
 describe('optional computation identity on the public engine port', () => {
     it('preserves the existing demo engine input, bar, and viewport contexts without claiming verification', async () => {
-        const { chart, handle, tick } = await fixture();
+        const { chart, handle, bars, tick } = await fixture();
         expect((await handle.context()).computation).toBeUndefined();
         handle.setInput('length', 2);
         expect((await handle.context()).plots.Average.at(-1).value).toBe(104.5);

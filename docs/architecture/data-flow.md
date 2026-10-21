@@ -89,6 +89,15 @@ If any condition fails, the core uses the static re-run path: it pokes the engin
 
 What deliberately survives: panes and indicator records (legend rows, inputs, pane placement), user drawings, the renderer's cosmetic config, the zoom (the view keeps its bar spacing and only re-anchors the newest bars at the right edge — the previous pan pointed at another market's time range), and every event subscription. Old sessions are never poked with the new market's bars — bar/viewport notifications are held during the switch, and the re-execution that follows is what computes over the new data.
 
+For a new snapshot of the **current offline market**, use
+`chart.setMarket({ data: snapshot, preserveView: true })`. This retains fractional
+time framing and manual price scales, including indicator scales. A view at the
+latest bar follows new candles; a view parked in history keeps its anchor within
+the retained data. Symbol, timeframe and session must remain unchanged, and both
+the current market and replacement must supply offline data. Consumers restart
+over exactly the replacement snapshot, so a replay host must provide only the
+bars it has revealed. The option does not grant access to future data.
+
 ## Causal, stateful execution
 
 Scripts in Vela™ are **causal and stateful**: a value at a bar can depend on every bar before it. Because of that, the engine always runs over the **full history**, never just the visible window.

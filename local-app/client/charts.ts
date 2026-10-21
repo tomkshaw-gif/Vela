@@ -46,6 +46,8 @@ registerIcon('local-trade', '<svg viewBox="0 0 24 24" fill="none" stroke="curren
 registerIcon('local-assistant', '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5Z"/></svg>');
 registerWidgetAction({ id: 'local.sessions', target: 'topbar', label: 'Sessions & results', icon: 'local-sessions', iconOnly: true,
     run: (ctx) => chromeEvent(ctx, 'sessions') });
+registerWidgetAction({ id: 'local.chart-mode', target: 'topbar', label: 'Chart', run: (ctx) => chromeEvent(ctx, 'chart') });
+registerWidgetAction({ id: 'local.backtest-mode', target: 'topbar', label: 'Backtesting', run: (ctx) => chromeEvent(ctx, 'backtest') });
 registerWidgetAttachment({ id: 'local.replay', mount: (ctx) => {
     const strip = ctx.host.ownerDocument.createElement('div'); strip.className = 'local-replay-strip';
     const undock = ctx.dockStrip(strip);
@@ -127,7 +129,7 @@ export class ReplayCharts {
         private isAgentBlocked: () => boolean = () => false,
         private isTradingBlocked: () => boolean = isAgentBlocked) {}
 
-    async mount(view: SessionView): Promise<void> {
+    async mount(view: SessionView, options: { mode?: 'chart' | 'backtest' } = {}): Promise<void> {
         this.destroy();
         this.controller = new AbortController();
         this.view = view;
@@ -199,7 +201,7 @@ export class ReplayCharts {
             theme: CHART_THEME,
             layout: '1', symbol: `replay:${view.dataset.symbol}`, timeframe: '1', data: [], live: false, bars: 5000,
             persist: false, watermark: !!state, volume: !!state,
-            layoutMode: 'auto', topbar: CHART_TOPBAR,
+            layoutMode: 'auto', topbar: { ...CHART_TOPBAR, right: ['local.chart-mode', 'local.backtest-mode', ...CHART_TOPBAR.right] },
             rangePresets: LOCAL_RANGE_PRESETS, sessionControls: false,
             onDateJump: () => { if (this.workspace) chromeEvent(this.workspace.context(), 'date-jump'); },
             timeframes: [...TIMEFRAMES].filter((timeframe) => view.dataset.schema === 'ohlcv-1s' || !timeframe.endsWith('S')),
@@ -254,6 +256,7 @@ export class ReplayCharts {
         this.lastSaved = needsInitialSave ? '' : JSON.stringify(this.workspace?.getState());
         this.onActive(this.timeframe);
         this.scriptWorkspace = mountScriptWorkspace({ workspace: this.workspace, api: this.api, session: () => this.view,
+            initialOpen: options.mode !== 'chart',
             cutoff: () => this.cursorTime, blocked: () => this.persistenceSuspended || this.restoring || this.isAgentBlocked(),
             onChange: () => this.flush(), onError: this.onError });
         const appContext = createAppAgentContext({ api: this.api, getView: () => this.view, getCursorTime: () => this.cursorTime,
@@ -339,15 +342,8 @@ export class ReplayCharts {
                 if (timeframe === nativeTimeframe) nativeCursorTime = result.cursorTime;
                 this.bars.set(timeframe, bars);
                 await Promise.all(cells.filter((cell) => (cell.chart.market.timeframe ?? '1') === timeframe).map(async (cell) => {
-                    const range = cell.chart.getVisibleRange();
                     await this.writeMarket(cell.chart, timeframe, bars);
                     if (generation !== this.generation) return;
-                    if (range && prior.length) {
-                        const previousLast = prior.at(-1)!.time;
-                        const following = range.to >= previousLast;
-                        const shift = following && bars.length ? bars.at(-1)!.time - previousLast : 0;
-                        cell.chart.setVisibleRange({ from: range.from + shift, to: range.to + shift });
-                    }
                 }));
             }));
             if (generation !== this.generation) return;
@@ -372,7 +368,8 @@ export class ReplayCharts {
         if (!this.view) return;
         const market = { symbol: `replay:${this.view.dataset.symbol}`, timeframe };
         this.writing.set(chart, market);
-        try { await chart.setMarket({ ...market, data, bars: 5000 }); }
+        const preserveView = chart.market.offline && chart.market.symbol === market.symbol && chart.market.timeframe === timeframe;
+        try { await chart.setMarket({ ...market, data, bars: 5000, preserveView }); }
         finally { if (this.writing.get(chart) === market) this.writing.delete(chart); }
     }
 
@@ -534,7 +531,10 @@ export class ReplayCharts {
     }
 
     /** Pull live drawings and indicator inputs directly, bypassing both debounce timers. */
-    async prepareForUpdate(): Promise<void> { await this.scriptWorkspace?.prepareForUpdate(); await this.flush(); }
+    async prepareForUpdate(saveLayout = true): Promise<void> {
+        await this.scriptWorkspace?.prepareForUpdate();
+        if (saveLayout) await this.flush();
+    }
 
     async flush(): Promise<void> {
         await this.scriptWorkspace?.flush();

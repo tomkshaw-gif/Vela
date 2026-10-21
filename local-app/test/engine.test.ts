@@ -163,6 +163,31 @@ describe('prop evaluation', () => {
 });
 
 describe('validation and bounds', () => {
+    it.each([1, 999, 1000, 1500, 1999, 2000])('accepts a %s practice balance with unchanged rule defaults through creation, replay and persistence', initialBalance => {
+        const practice = config({ initialBalance, rules: { ...DEFAULT_RULES } });
+        expect(validateSessionConfig(practice)).toEqual(practice);
+        expect(() => validateSessionConfig({ ...practice, mode: 'prop' })).toThrow('Loss and drawdown limits must be less than initial balance');
+        const bars = [bar(0), bar(1)]; const session = createSession(practice, instrument, 'small-practice');
+        const replayed = applyCommand(session, bars, { type: 'advance', count: 1 });
+        expect(replayed.status).toBe('paused'); expect(replayed.account.balance).toBe(initialBalance);
+        expect(validateStoredSession(replayed, bars, instrument)).toEqual(replayed);
+    });
+    it.each(['maxDailyLossUsd', 'maxDrawdownUsd'] as const)('keeps the Prop %s bound strictly below initial balance', key => {
+        const prop = config({ mode: 'prop', initialBalance: 1500 }, { maxDailyLossUsd: 100, maxDrawdownUsd: 200 });
+        expect(validateSessionConfig(prop)).toEqual(prop);
+        for (const limit of [1500, 1501]) expect(() => validateSessionConfig({ ...prop, rules: { ...prop.rules, [key]: limit } }))
+            .toThrow('Loss and drawdown limits must be less than initial balance');
+        expect(validateSessionConfig({ ...prop, rules: { ...prop.rules, [key]: 1499 } }).rules[key]).toBe(1499);
+    });
+    it.each(['practice', 'prop'] as const)('retains shared shape, finite-value, timezone and contract safety for %s', mode => {
+        for (const patch of [
+            { rules: null }, { initialBalance: 0 }, { initialBalance: NaN }, { startIndex: -1 }, { commissionPerContractSide: Infinity },
+            { rules: { ...DEFAULT_RULES, profitTargetUsd: NaN } }, { rules: { ...DEFAULT_RULES, maxDailyLossUsd: Infinity } },
+            { rules: { ...DEFAULT_RULES, maxDrawdownUsd: -Infinity } }, { rules: { ...DEFAULT_RULES, maxContracts: 0 } },
+            { rules: { ...DEFAULT_RULES, dayResetTimezone: 'Not/AZone' } }, { rules: { ...DEFAULT_RULES, dayResetHour: 24 } },
+            { rules: { ...DEFAULT_RULES, drawdownType: 'unknown' } }, { rules: { ...DEFAULT_RULES, drawdownLocksAtInitialBalance: 'true' } },
+        ]) expect(() => validateSessionConfig({ ...config({ mode }), ...patch })).toThrow();
+    });
     it('rejects invalid ticks, sizes, brackets, amendments and contingent exposure atomically', () => {
         const bars = [bar(0), bar(1), bar(2)]; const s = createSession(config({}, { maxContracts: 1 }), instrument);
         for (const order of [ { side: 'buy', type: 'limit', qty: 1, price: 100.1 }, { side: 'buy', type: 'market', qty: 0 }, { side: 'buy', type: 'market', qty: 2 } ]) expect(() => applyCommand(s, bars, { type: 'place', order } as Command)).toThrow();

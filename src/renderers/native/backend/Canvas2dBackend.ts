@@ -9,6 +9,7 @@ import type { SceneGraph, PaneNode } from '../core/SceneGraph';
 import { candleTier, wickWidth, candleGeometry, snapY, aggregateCandleColumns, terminalCandleGeometry, rasterizeTerminalCandles, type TerminalCandle } from './candle-lod';
 import { BASELINE_TOP_LINE, BASELINE_BOTTOM_LINE, BASELINE_FILL_ALPHA, BASELINE_FILL_ALPHA_FAR, withAlpha, effectiveCandlePaint } from '../core/chartConfig';
 import type { IRenderBackend } from './IRenderBackend';
+import { BarColorCache } from './BarColorCache';
 
 /**
  * Canvas2d GEOMETRY backend (L0) — the PRIMARY native backend and the WebGL2
@@ -29,6 +30,7 @@ export class Canvas2dBackend implements IRenderBackend {
     candleBodyScale = 1;
     private canvas: HTMLCanvasElement | null = null;
     private ctx: CanvasRenderingContext2D | null = null;
+    private readonly barColorCache = new BarColorCache();
 
     mount(canvas: HTMLCanvasElement): void {
         this.canvas = canvas;
@@ -58,7 +60,7 @@ export class Canvas2dBackend implements IRenderBackend {
         // forward), so they paint through the visible right whitespace too.
         const s1 = Math.max(i1, Math.ceil(vr.to));
 
-        const barColorMap = mergeBarColors(scene.indicators);
+        const barColorMap = this.barColorCache.get(scene.indicators, scene.barColorsRevision);
         const panes = scene.orderedPanes();
 
         // Session highlights + the grid paint on the renderer's BACKDROP canvas, below
@@ -164,6 +166,7 @@ export class Canvas2dBackend implements IRenderBackend {
     }
 
     destroy(): void {
+        this.barColorCache.clear();
         this.canvas = null;
         this.ctx = null;
     }
@@ -851,23 +854,3 @@ function findPoints(model: IndicatorModel, seriesId: string): LineLikeSeries['po
     const s = model.series.find((x) => x.id === seriesId);
     return s && isLineLikeSeries(s) ? s.points : null;
 }
-
-const EMPTY_BARCOLORS: ReadonlyMap<number, string> = new Map();
-
-function mergeBarColors(indicators: Map<string, IndicatorModel>): ReadonlyMap<number, string> {
-    // Common case (no barcolor() anywhere) → shared empty map, no per-frame alloc.
-    let any = false;
-    for (const m of indicators.values()) {
-        if (m.barColors && m.barColors.length > 0) {
-            any = true;
-            break;
-        }
-    }
-    if (!any) return EMPTY_BARCOLORS;
-    const map = new Map<number, string>();
-    for (const m of indicators.values()) {
-        if (m.barColors) for (const bc of m.barColors) map.set(bc.time, bc.color);
-    }
-    return map;
-}
-

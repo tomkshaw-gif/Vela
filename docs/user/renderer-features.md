@@ -217,6 +217,15 @@ current-price line, last-price animation on/off), the animation switches (zoom, 
 momentum, price-scale glide, first-load reveal), time-scale timezone, candle body, border
 and wick, and per-style colors for bars / line / area / baseline.
 
+Native config exports use version 2. `timeScale.rightOffsetConvention` records
+whether `margins.right` measures from a candle center (`bar-center`) or its outer
+edge (`bar-edge`). Version 1 documents retain their original candle framing when
+opened with terminal interactions and export with an explicit convention. New
+terminal configurations use the edge convention; standard interactions keep the
+center convention. An explicit time-axis or factory reset adopts the current
+interaction profile's convention. Unversioned partial patches keep the current
+convention. These settings do not serialize the current pan or zoom position.
+
 ### Hollow candles
 
 Hollow candles are a `candles` setting, not a separate price style: turn the body off and

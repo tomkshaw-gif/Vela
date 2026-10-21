@@ -50,6 +50,7 @@ export class Scheduler {
     private handle: number | null = null;
     private readonly raf: RafScheduler;
     private readonly cancel: RafCanceller;
+    private destroyed = false;
 
     constructor(
         private readonly onFrame: FrameFn,
@@ -61,13 +62,14 @@ export class Scheduler {
     }
 
     invalidate(level: InvalidateLevel): void {
-        if (level <= InvalidateLevel.None) return;
+        if (this.destroyed || level <= InvalidateLevel.None) return;
         if (level > this.level) this.level = level;
         if (this.handle === null) this.handle = this.raf(() => this.flush());
     }
 
     /** Force a synchronous repaint now (used by resize so layout is immediate). */
     flushNow(level: InvalidateLevel): void {
+        if (this.destroyed) return;
         if (this.handle !== null) {
             this.cancel(this.handle);
             this.handle = null;
@@ -80,10 +82,13 @@ export class Scheduler {
         this.handle = null;
         const level = this.level;
         this.level = InvalidateLevel.None;
-        if (level !== InvalidateLevel.None) this.onFrame(level);
+        if (level !== InvalidateLevel.None) {
+            this.onFrame(level);
+        }
     }
 
     destroy(): void {
+        this.destroyed = true;
         if (this.handle !== null) {
             this.cancel(this.handle);
             this.handle = null;

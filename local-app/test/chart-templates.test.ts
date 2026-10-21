@@ -111,6 +111,25 @@ describe('indicator templates', () => {
         await applyIndicatorTemplate(port, { natives: [native()], scripts: [] }, 'append'); expect(old.remove).not.toHaveBeenCalled();
         await expect(applyIndicatorTemplate(port, { natives: [native('footprint')], scripts: [] }, 'replace')).rejects.toThrow('unavailable'); expect(old.remove).not.toHaveBeenCalled();
     });
+    it('keeps edits to untouched singleton studies when a staged script fails', async () => {
+        const old = handle('Volume', 'volume'), { port } = chart([old]);
+        port.runIndicator.mockImplementation(async () => {
+            old.setInputs({ length: 33 }); old.setVisible(false);
+            return { ok: false, handle: null!, error: new Error('Compile failed') as never, context: null };
+        });
+        await expect(applyIndicatorTemplate(port, { natives: [native('volume')], scripts: scripts() }, 'replace')).rejects.toThrow('Compile failed');
+        expect(old.inputValues()).toEqual({ length: 33 }); expect(old.visible).toBe(false);
+        expect(old.remove).not.toHaveBeenCalled();
+    });
+    it('restores only changed singleton settings after a partial commit fails', async () => {
+        const old = handle('Volume', 'volume'), { port, added } = chart([old]);
+        const setVisible = vi.mocked(old.setVisible).getMockImplementation()!;
+        vi.spyOn(old, 'setVisible').mockImplementationOnce(() => { throw new Error('Apply failed'); }).mockImplementation(setVisible);
+        await expect(applyIndicatorTemplate(port, { natives: [native(), native('volume')], scripts: [] }, 'replace')).rejects.toThrow('Apply failed');
+        expect(added[0]!.remove).toHaveBeenCalledOnce();
+        expect(old.inputValues()).toEqual({ length: 20 }); expect(old.visible).toBe(true);
+        expect(old.remove).not.toHaveBeenCalled();
+    });
 });
 
 describe('template panel workflow', () => {
@@ -150,5 +169,189 @@ describe('template panel workflow', () => {
         const archived = host.querySelector<HTMLInputElement>('[data-archived]')!; archived.checked = true; archived.dispatchEvent(new Event('change', { bubbles: true })); click('restore');
         await vi.waitFor(() => expect(host.querySelector('.template-card')).toBeNull());
         archived.checked = false; archived.dispatchEvent(new Event('change', { bubbles: true })); expect(host.querySelector('.template-card strong')?.textContent).toBe('London');
+    });
+});
+
+describe('template favorites and recents', () => {
+    it('keeps legacy templates readable and persists favorites and bounded, deduplicated recent use', async () => {
+        const port = storage();
+        const templates = Array.from({ length: 25 }, (_, i) => ({ ...template(), id: `setup-${i}` }));
+        port.setItem(CHART_TEMPLATES_KEY, JSON.stringify({ version: 1, revision: 1, templates }));
+        const store = new ChartTemplateStore(port, locks);
+        expect(store.read().settings).toEqual({ favorites: [], recent: [] });
+        await store.setFavorite(1, 'setup-0', true);
+        for (const item of templates) await store.recordRecent(item.id, item.revision);
+        await store.recordRecent('setup-12', 1);
+        const restored = new ChartTemplateStore(port, locks).read();
+        expect(restored.settings.favorites).toEqual(['setup-0']);
+        expect(restored.settings.recent).toHaveLength(20);
+        expect(restored.settings.recent[0]).toBe('setup-12');
+        expect(new Set(restored.settings.recent).size).toBe(20);
+        await store.setFavorite(restored.revision, 'setup-0', false);
+        expect(store.read().settings.favorites).toEqual([]);
+    });
+
+    it('prunes missing references without changing template identities or writing on read', () => {
+        const port = storage(), raw = JSON.stringify({ version: 1, revision: 4, templates: [template()], settings: { favorites: ['gone', 'setup-1', 'setup-1'], recent: ['gone', 'setup-1'] } });
+        port.setItem(CHART_TEMPLATES_KEY, raw);
+        expect(new ChartTemplateStore(port, locks).read().settings).toEqual({ favorites: ['setup-1'], recent: ['setup-1'] });
+        expect(port.getItem(CHART_TEMPLATES_KEY)).toBe(raw);
+    });
+
+    it.each([
+        { favorites: 'setup-1', recent: [] },
+        { favorites: [123], recent: [] },
+        { favorites: ['bad/id'], recent: [] },
+        { favorites: [], recent: Array(21).fill('setup-1') },
+        { favorites: Array(51).fill('setup-1'), recent: [] },
+    ])('preserves malformed settings without silently replacing them: %j', async (settings) => {
+        const port = storage(), raw = JSON.stringify({ version: 1, revision: 1, templates: [template()], settings });
+        port.setItem(CHART_TEMPLATES_KEY, raw);
+        const store = new ChartTemplateStore(port, locks);
+        expect(() => store.read()).toThrow(/settings/i);
+        await expect(store.setFavorite(1, 'setup-1', true)).rejects.toThrow(/settings/i);
+        expect(port.getItem(CHART_TEMPLATES_KEY)).toBe(raw);
+    });
+
+    it('rejects stale edits, archived use and failed storage writes without losing prior preferences', async () => {
+        const port = storage(), store = new ChartTemplateStore(port, locks);
+        await store.update(0, () => [template()]);
+        await store.setFavorite(1, 'setup-1', true);
+        await expect(store.setFavorite(1, 'setup-1', false)).rejects.toThrow('another window');
+        await store.update(2, items => items.map(item => ({ ...item, archived: true, revision: 2 })));
+        await expect(store.recordRecent('setup-1', 1)).rejects.toThrow(/changed|archived/);
+        expect(store.read().settings).toEqual({ favorites: ['setup-1'], recent: [] });
+        const before = port.getItem(CHART_TEMPLATES_KEY);
+        vi.spyOn(port, 'setItem').mockImplementation(() => { throw new Error('Storage full'); });
+        await expect(store.setFavorite(3, 'setup-1', false)).rejects.toThrow('Storage full');
+        expect(port.getItem(CHART_TEMPLATES_KEY)).toBe(before);
+    });
+    it('merges recent use with newer favorites and cancels a write queued behind a lock', async () => {
+        const port = storage(), store = new ChartTemplateStore(port, locks);
+        await store.update(0, () => [template()]);
+        let enter!: () => void;
+        const queued = { request: (_key: string, callback: () => unknown) => new Promise(resolve => { enter = () => resolve(callback()); }) } as unknown as LockManager;
+        const pending = new ChartTemplateStore(port, queued).recordRecent('setup-1', 1);
+        await store.setFavorite(1, 'setup-1', true); enter(); await pending;
+        expect(store.read().settings).toEqual({ favorites: ['setup-1'], recent: ['setup-1'] });
+        const before = port.getItem(CHART_TEMPLATES_KEY); let current = true;
+        // The callback can throw while the lock is entered, just as the real lock promise rejects.
+        const cancelledLocks = { request: (_key: string, callback: () => unknown) => new Promise((resolve, reject) => { enter = () => { try { resolve(callback()); } catch (error) { reject(error); } }; }) } as unknown as LockManager;
+        const cancelled = new ChartTemplateStore(port, cancelledLocks).recordRecent('setup-1', 1, () => current);
+        current = false; enter(); await expect(cancelled).rejects.toThrow('active chart changed');
+        expect(port.getItem(CHART_TEMPLATES_KEY)).toBe(before);
+    });
+});
+
+function panelFixture() {
+    Object.defineProperty(navigator, 'locks', { value: locks, configurable: true });
+    const host = document.createElement('div'); document.body.append(host);
+    const { port, added } = chart([handle('original', 'moving-average')]);
+    const chartEvents = new Map<string, () => void>(), workspaceEvents = new Map<string, () => void>();
+    const target = { ...port, market: { symbol: 'replay:NQM4', timeframe: '1', offline: true }, setMarket: vi.fn(),
+        on: vi.fn((event: string, listener: () => void) => { chartEvents.set(event, listener); return () => chartEvents.delete(event); }) };
+    const cell = { id: 'c1', chart: target };
+    const workspace = { active: cell, cell: () => cell,
+        on: vi.fn((event: string, listener: () => void) => { workspaceEvents.set(event, listener); return () => workspaceEvents.delete(event); }) };
+    const onChange = vi.fn(async () => {}), applyWorkspace = vi.fn(async () => {});
+    const mount = () => { const panel = mountChartTemplates(host, { workspace: workspace as unknown as VelaWorkspace, onChange, applyWorkspace }); disposers.push(panel.destroy); return panel; };
+    return { host, target, added, chartEvents, workspaceEvents, workspace, onChange, applyWorkspace, mount };
+}
+
+describe('favorite and recent template application', () => {
+    it('uses accessible favorite and recent controls, restores them on remount and keeps the replay market pinned', async () => {
+        const store = new ChartTemplateStore(localStorage, locks);
+        await store.update(0, () => [template()]);
+        const fixture = panelFixture(), panel = fixture.mount(), { host } = fixture;
+        const favorite = host.querySelector<HTMLButtonElement>('[data-action="favorite"]')!;
+        expect(favorite?.getAttribute('aria-pressed')).toBe('false');
+        favorite.focus(); favorite.click();
+        await vi.waitFor(() => expect(host.querySelector('[data-action="favorite"]')?.getAttribute('aria-pressed')).toBe('true'));
+        expect(document.activeElement?.getAttribute('data-action')).toBe('favorite');
+        const quick = host.querySelector<HTMLButtonElement>('.template-favorites [data-action="apply"]')!;
+        expect(quick?.getAttribute('aria-label')).toContain('NQ setup'); quick.click();
+        await vi.waitFor(() => expect(fixture.onChange).toHaveBeenCalledOnce());
+        await vi.waitFor(() => expect(store.read().settings.recent).toEqual(['setup-1']));
+        expect(fixture.target.setMarket).not.toHaveBeenCalled();
+        expect(fixture.target.market.symbol).toBe('replay:NQM4');
+        panel.destroy(); fixture.mount();
+        host.querySelector<HTMLButtonElement>('.template-recents [data-action="apply"]')!.click();
+        await vi.waitFor(() => expect(fixture.onChange).toHaveBeenCalledTimes(2));
+        const collection = host.querySelector<HTMLSelectElement>('[data-collection]')!;
+        collection.value = 'favorites'; collection.dispatchEvent(new Event('change', { bubbles: true }));
+        expect(host.querySelectorAll('.template-list .template-card')).toHaveLength(1);
+        expect(host.querySelector('.template-note')?.textContent).toContain('pane placement and order are not included');
+    });
+
+    it('never applies a stale favorite even when its storage event has not arrived', async () => {
+        const store = new ChartTemplateStore(localStorage, locks);
+        await store.update(0, () => [template()]); await store.setFavorite(1, 'setup-1', true);
+        const fixture = panelFixture(); fixture.mount();
+        await store.update(2, items => items.map(item => ({ ...item, archived: true, revision: 2 })));
+        fixture.host.querySelector<HTMLButtonElement>('.template-favorites [data-action="apply"]')!.click();
+        await vi.waitFor(() => expect(fixture.host.querySelector('.template-message')?.textContent).toMatch(/changed|archived/));
+        expect(fixture.target.availableNativeIndicators).not.toHaveBeenCalled();
+        expect(fixture.onChange).not.toHaveBeenCalled();
+        expect(store.read().settings.recent).toEqual([]);
+    });
+
+    it('keeps malformed preference storage intact and offers a working refresh after recovery', () => {
+        const raw = JSON.stringify({ version: 1, revision: 1, templates: [template()], settings: { favorites: null, recent: [] } });
+        localStorage.setItem(CHART_TEMPLATES_KEY, raw);
+        const fixture = panelFixture(); fixture.mount();
+        expect(fixture.host.querySelector('.template-message')?.textContent).toMatch(/settings/i);
+        expect(localStorage.getItem(CHART_TEMPLATES_KEY)).toBe(raw);
+        localStorage.setItem(CHART_TEMPLATES_KEY, JSON.stringify({ version: 1, revision: 1, templates: [template()] }));
+        fixture.host.querySelector<HTMLButtonElement>('[data-action="refresh"]')!.click();
+        expect(fixture.host.querySelector('.template-card strong')?.textContent).toBe('NQ setup');
+    });
+
+    it('rolls back staged studies when the template changes during compilation, before removing originals', async () => {
+        const source = template(); if (source.kind === 'indicators') source.data = { natives: [native()], scripts: scripts() };
+        const store = new ChartTemplateStore(localStorage, locks); await store.update(0, () => [source]);
+        const fixture = panelFixture(); fixture.mount();
+        let settle!: (result: Awaited<ReturnType<typeof fixture.target.runIndicator>>) => void;
+        fixture.target.runIndicator.mockImplementation(() => new Promise(resolve => { settle = resolve; }));
+        fixture.host.querySelector<HTMLButtonElement>('[data-action="apply"]')!.click();
+        await vi.waitFor(() => expect(fixture.target.runIndicator).toHaveBeenCalledOnce());
+        await store.update(1, items => items.map(item => ({ ...item, revision: 2, name: 'Changed setup' })));
+        const staged = handle('pending', undefined, 'indicator("Test")');
+        settle({ ok: true, handle: staged, error: null, context: null });
+        await vi.waitFor(() => expect(fixture.added[0]!.remove).toHaveBeenCalledOnce());
+        expect(staged.remove).toHaveBeenCalledOnce();
+        expect(fixture.target.indicators()[0]!.remove).not.toHaveBeenCalled();
+        expect(fixture.onChange).not.toHaveBeenCalled();
+        expect(store.read().settings.recent).toEqual([]);
+    });
+
+    it('reports applied state separately when recent-use storage fails and retains prior favorites', async () => {
+        const store = new ChartTemplateStore(localStorage, locks); await store.update(0, () => [template()]); await store.setFavorite(1, 'setup-1', true);
+        const fixture = panelFixture(); fixture.mount();
+        vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('Storage full'); });
+        fixture.host.querySelector<HTMLButtonElement>('.template-favorites [data-action="apply"]')!.click();
+        await vi.waitFor(() => expect(fixture.host.querySelector('.template-message')?.textContent).toContain('applied. Recent use could not be saved'));
+        expect(fixture.onChange).toHaveBeenCalledOnce();
+        expect(store.read().settings).toEqual({ favorites: ['setup-1'], recent: [] });
+    });
+
+    it.each(['failure', 'destroy', 'cell-switch', 'market-switch'])('does not record recent use or persist a partial application after %s', async (reason) => {
+        const source = template(); if (source.kind === 'indicators') source.data = { natives: [native()], scripts: scripts() };
+        const store = new ChartTemplateStore(localStorage, locks); await store.update(0, () => [source]); await store.setFavorite(1, source.id, true);
+        const fixture = panelFixture(), panel = fixture.mount();
+        let settle!: (result: Awaited<ReturnType<typeof fixture.target.runIndicator>>) => void;
+        fixture.target.runIndicator.mockImplementation(() => new Promise(resolve => { settle = resolve; }));
+        fixture.host.querySelector<HTMLButtonElement>('.template-favorites [data-action="apply"]')!.click();
+        await vi.waitFor(() => expect(fixture.target.runIndicator).toHaveBeenCalledOnce());
+        if (reason === 'destroy') panel.destroy();
+        if (reason === 'cell-switch') fixture.workspaceEvents.get('cell:active')?.();
+        if (reason === 'market-switch') fixture.chartEvents.get('load:start')?.();
+        const staged = handle('pending', undefined, 'indicator("Test")');
+        settle(reason === 'failure' ? { ok: false, handle: null!, error: new Error('Compile failed') as never, context: null } : { ok: true, handle: staged, error: null, context: null });
+        await vi.waitFor(() => expect(fixture.added[0]!.remove).toHaveBeenCalledOnce());
+        expect(fixture.target.indicators()[0]!.remove).not.toHaveBeenCalled();
+        expect(fixture.onChange).not.toHaveBeenCalled();
+        expect(store.read().settings.recent).toEqual([]);
+        expect(fixture.target.setMarket).not.toHaveBeenCalled();
+        expect(fixture.chartEvents.size).toBe(0); expect(fixture.workspaceEvents.size).toBe(0);
     });
 });

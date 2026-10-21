@@ -45,6 +45,7 @@ export function validateInstrument(v: unknown): Instrument {
 }
 export function validateSessionConfig(v: unknown, barCount?: number): SessionConfig {
     const x = object(v, 'Session config');
+    const mode = choice(x.mode, ['practice', 'prop'], 'Session mode');
     const r = object(x.rules, 'Prop rules');
     const timezone = text(r.dayResetTimezone, 'Reset timezone', 80);
     try { new Intl.DateTimeFormat('en-US', { timeZone: timezone }).format(0); } catch { throw new Error('Reset timezone is invalid'); }
@@ -64,14 +65,15 @@ export function validateSessionConfig(v: unknown, barCount?: number): SessionCon
     if (Math.abs(commission * 100 - Math.round(commission * 100)) > 1e-6) throw new Error('Commission supports whole cents');
     const initialBalance = number(x.initialBalance, 'Initial balance', 1, 1e9);
     if (Math.abs(initialBalance * 100 - Math.round(initialBalance * 100)) > 1e-6) throw new Error('Initial balance supports whole cents');
-    if (rules.maxDrawdownUsd >= initialBalance || rules.maxDailyLossUsd >= initialBalance) throw new Error('Loss and drawdown limits must be less than initial balance');
+    if (mode === 'prop' && (rules.maxDrawdownUsd >= initialBalance || rules.maxDailyLossUsd >= initialBalance)) throw new Error('Loss and drawdown limits must be less than initial balance');
+    const startIndex = integer(x.startIndex, 'Start index', 0, barCount === undefined ? 5000000 : Math.max(0, barCount - 1));
     return {
         name: text(x.name, 'Session name'), datasetId: id(x.datasetId, 'Dataset ID'),
-        mode: choice(x.mode, ['practice', 'prop'], 'Session mode'), initialBalance,
+        mode, initialBalance,
         commissionPerContractSide: commission,
         slippageTicks: integer(x.slippageTicks, 'Slippage ticks', 0, 100),
         spreadTicks: integer(x.spreadTicks, 'Spread ticks', 0, 100),
-        startIndex: integer(x.startIndex, 'Start index', 0, barCount === undefined ? 5000000 : Math.max(0, barCount - 1)), rules,
+        startIndex, ...(x.endIndex === undefined ? {} : { endIndex: integer(x.endIndex, 'End index', startIndex + 1, barCount ?? 5000000) }), rules,
     };
 }
 export function validateBar(bar: Bar, instrument: Instrument): void {
@@ -139,7 +141,7 @@ export function validateStoredSession(input: unknown, bars: Bar[], expectedInstr
     const config = validateSessionConfig(x.config, bars.length);
     const instrument = validateInstrument(x.instrument);
     if (JSON.stringify(instrument) !== JSON.stringify(validateInstrument(expectedInstrument))) throw new Error('Session instrument does not match dataset');
-    const cursor = integer(x.cursor, 'Cursor', config.startIndex - 1, bars.length - 1);
+    const cursor = integer(x.cursor, 'Cursor', config.startIndex - 1, (config.endIndex ?? bars.length) - 1);
     if (cursor >= 0) validateBar(bars[cursor]!, instrument);
     const a = object(x.account, 'Account');
     const p = object(x.prop, 'Prop state');

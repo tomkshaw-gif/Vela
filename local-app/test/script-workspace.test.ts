@@ -35,16 +35,17 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reje
 }
 beforeEach(() => {
     vi.clearAllMocks(); mocks.backtest.mockReset(); mocks.editorOptions = undefined; mocks.editor.flush.mockResolvedValue();
+    mocks.editor.open.mockReturnValue(true);
     mocks.backtest.mockImplementation(async (options) => ({ state: state(options.source === 'source-A' ? 100 : 200), trades: [], warnings: [] }));
 });
 afterEach(() => { disposers.splice(0).forEach((dispose) => dispose()); document.body.replaceChildren(); });
 
-async function fixture() {
+async function fixture(initialOpen = true, openEditor = true) {
     const root = document.createElement('div'); root.innerHTML = '<div class="vela-widget-panels"></div>'; document.body.append(root);
     let onUpdate: ((run: NonNullable<ScriptRunResult['run']>) => void) | undefined;
     const chartRun = { id: 'chart-B', title: 'Chart B', kind: 'strategy', strategy: state(20), warnings: [], trades: vi.fn(async () => []) } as unknown as NonNullable<ScriptRunResult['run']>;
     const result = { ok: true, run: chartRun, error: null, onUpdate: (callback: typeof onUpdate) => { onUpdate = callback; return () => { onUpdate = undefined; }; }, remove: vi.fn() } as ScriptRunResult;
-    const handle = { id: 'chart-B', title: 'Chart B', source: 'source-B', inputValues: () => ({}), propValues: () => ({}), updateCode: vi.fn(async (): Promise<{ ok: boolean; error: Error | null }> => ({ ok: true, error: null })), context: vi.fn(async () => ({ strategy: state(30), trades: [], warnings: [] })) };
+    const handle = { id: 'chart-B', title: 'Chart B', source: 'source-B', remove: vi.fn(), inputValues: () => ({}), propValues: () => ({}), updateCode: vi.fn(async (): Promise<{ ok: boolean; error: Error | null }> => ({ ok: true, error: null })), context: vi.fn(async () => ({ strategy: state(30), trades: [], warnings: [] })) };
     const chart = { market: { timeframe: '1' }, runScript: vi.fn(async () => result), indicators: () => [handle], setVisibleRange: vi.fn(), renderer: { supportsIndicatorSettings: true, openIndicatorSettings: vi.fn() } };
     const workspace = { root, chart, context: () => ({ dockStrip: (element: HTMLElement) => { root.append(element); return () => element.remove(); } }) } as unknown as VelaWorkspace;
     const series = { bars: [{ time: 0, open: 100, high: 100, low: 100, close: 100, volume: 1 }, { time: 60000, open: 101, high: 101, low: 101, close: 101, volume: 1 }], hasMore: false, cursorTime: 60000, symbolInfo: { ticker: 'NQM4', mintick: .25, pointvalue: 20 }, sourceDatasets: [{ id: 'dataset', checksum: 'checksum' }] };
@@ -53,15 +54,126 @@ async function fixture() {
     const api = { get, post } as unknown as LocalApi;
     const view = { session: { id: 'session', cursor: 1 }, dataset: { id: 'dataset', symbol: 'NQM4', start: 0, end: 180000, intervalMs: 60000, checksum: 'checksum' } } as SessionView;
     const onChange = vi.fn(async () => {}), onError = vi.fn();
-    const app = mountScriptWorkspace({ workspace, api, session: () => view, cutoff: () => 60000, blocked: () => false, onChange, onError }); disposers.push(app.destroy);
-    root.querySelector<HTMLButtonElement>('[aria-label="Pine Editor"]')!.click();
-    await vi.waitFor(() => expect(mocks.editorOptions).toBeDefined());
+    const app = mountScriptWorkspace({ workspace, api, session: () => view, initialOpen, cutoff: () => 60000, blocked: () => false, onChange, onError }); disposers.push(app.destroy);
+    if (openEditor) {
+        root.querySelector<HTMLButtonElement>('[aria-label="Pine Editor"]')!.click();
+        await vi.waitFor(() => expect(mocks.editorOptions).toBeDefined());
+    }
     return { root, app, get, post, chart, workspace, view, chartRun, handle, onChange, onError, series,
         emit: (run = chartRun) => onUpdate?.(run), editor: mocks.editorOptions! };
 }
 const latest = (): StrategyResultsSnapshot | undefined => mocks.results.update.mock.lastCall?.[0];
+async function link(f: Awaited<ReturnType<typeof fixture>>): Promise<void> {
+    f.root.dispatchEvent(new CustomEvent('local-pine:edit', { detail: { id: f.handle.id, source: f.handle.source, name: f.handle.title } }));
+    await vi.waitFor(() => expect(mocks.editor.open).toHaveBeenCalled());
+}
+
+describe('chart execution ownership', () => {
+    it('continues the previous live report when compiling a new chart script fails', async () => {
+        const f = await fixture(); await f.editor.onRun('source-B');
+        f.root.querySelector<HTMLButtonElement>('[aria-label="Strategy Tester"]')!.click();
+        f.chart.runScript.mockResolvedValueOnce({ ok: false, run: null, error: new Error('Compile failed'), onUpdate: () => () => {}, remove: vi.fn() });
+        await expect(f.editor.onRun('bad-new-source')).rejects.toThrow('Compile failed');
+        f.emit({ ...f.chartRun, title: 'Previous live run' });
+        await vi.waitFor(() => expect(latest()?.name).toBe('Previous live run'));
+    });
+    it('keeps the existing link when the editor refuses a chart-source switch', async () => {
+        const f = await fixture(); await link(f);
+        const other = { ...f.handle, updateCode: vi.fn(async () => ({ ok: true, error: null })), remove: vi.fn() };
+        mocks.editor.open.mockReturnValueOnce(false);
+        Object.defineProperty(f.workspace, 'chart', { value: { ...f.chart, indicators: () => [other] }, configurable: true });
+        f.root.dispatchEvent(new CustomEvent('local-pine:edit', { detail: { id: other.id, source: other.source, name: 'Other' } }));
+        await vi.waitFor(() => expect(mocks.editor.open).toHaveBeenCalledTimes(2));
+        await expect(f.editor.onUpdate(f.handle.id, 'must stay with first')).rejects.toThrow(/chart|session/);
+        expect(other.updateCode).not.toHaveBeenCalled();
+    });
+    it.each(['update', 'remove'] as const)('rechecks the linked owner after saving before %s mutates a handle', async action => {
+        const f = await fixture(); await f.editor.onBacktest('source-A', doc('A')); await link(f);
+        const pending = deferred<StoredBacktest>(); f.post.mockReturnValueOnce(pending.promise);
+        const operation = action === 'update' ? f.editor.onUpdate(f.handle.id, 'new') : f.editor.onRemove!(f.handle.id);
+        const rejected = expect(operation).rejects.toThrow(/chart|session/);
+        await vi.waitFor(() => expect(f.post).toHaveBeenCalled());
+        Object.defineProperty(f.workspace, 'chart', { value: { ...f.chart }, configurable: true }); pending.resolve(stored('A')); await rejected;
+        expect(f.handle.updateCode).not.toHaveBeenCalled(); expect(f.handle.remove).not.toHaveBeenCalled();
+        expect(latest()?.name).toBe('Strategy A');
+    });
+    it.each([true, false])('continues live report updates after an in-place compile (success=%s)', async success => {
+        const f = await fixture(); await f.editor.onRun('source-B');
+        f.root.querySelector<HTMLButtonElement>('[aria-label="Strategy Tester"]')!.click();
+        f.handle.updateCode.mockResolvedValueOnce({ ok: success, error: success ? null : new Error('Compile failed') });
+        if (success) await f.editor.onUpdate(f.handle.id, 'new');
+        else await expect(f.editor.onUpdate(f.handle.id, 'new')).rejects.toThrow('Compile failed');
+        f.emit({ ...f.chartRun, title: 'Latest live run' });
+        await vi.waitFor(() => expect(latest()?.name).toBe('Latest live run'));
+    });
+    it('keeps separately created runs with identical chart-local IDs for owned disposal', async () => {
+        const f = await fixture(); await f.editor.onRun('source-B');
+        const first = await f.chart.runScript(); f.chart.runScript.mockClear();
+        const second = { ...first, remove: vi.fn() };
+        Object.defineProperty(f.workspace, 'chart', { value: { ...f.chart, runScript: async () => second }, configurable: true });
+        await f.editor.onRun('source-B'); f.app.destroy();
+        expect(first.remove).toHaveBeenCalledOnce(); expect(second.remove).toHaveBeenCalledOnce();
+    });
+    it.each(['update', 'remove'] as const)('rejects linked %s after another chart reuses the same script ID', async action => {
+        const f = await fixture(); await link(f);
+        const other = { ...f.handle, updateCode: vi.fn(async () => ({ ok: true, error: null })), remove: vi.fn() };
+        Object.defineProperty(f.workspace, 'chart', { value: { ...f.chart, indicators: () => [other] }, configurable: true });
+        await expect(action === 'update' ? f.editor.onUpdate(f.handle.id, 'new') : f.editor.onRemove!(f.handle.id)).rejects.toThrow(/chart|session/);
+        expect(other.updateCode).not.toHaveBeenCalled(); expect(other.remove).not.toHaveBeenCalled();
+        expect(f.handle.updateCode).not.toHaveBeenCalled(); expect(f.handle.remove).not.toHaveBeenCalled();
+        expect(f.onChange).not.toHaveBeenCalled();
+    });
+    it.each(['chart', 'session', 'handle', 'timeframe'] as const)('rejects a delayed compilation when the %s owner changes', async change => {
+        const f = await fixture(); await link(f);
+        const pending = deferred<{ ok: boolean; error: Error | null }>(); f.handle.updateCode.mockReturnValueOnce(pending.promise);
+        const operation = f.editor.onUpdate(f.handle.id, 'new'); const rejected = expect(operation).rejects.toThrow(/chart|session|script/);
+        await vi.waitFor(() => expect(f.handle.updateCode).toHaveBeenCalledOnce());
+        if (change === 'chart') Object.defineProperty(f.workspace, 'chart', { value: { ...f.chart }, configurable: true });
+        if (change === 'session') f.view.session.id = 'next-session';
+        if (change === 'handle') f.chart.indicators = () => [{ ...f.handle }];
+        if (change === 'timeframe') f.chart.market.timeframe = '5';
+        pending.resolve({ ok: true, error: null }); await rejected;
+        expect(f.handle.context).not.toHaveBeenCalled(); expect(f.onChange).not.toHaveBeenCalled(); expect(latest()).toBeUndefined();
+    });
+    it('rechecks ownership after context retrieval and does not publish or persist a stale report', async () => {
+        const f = await fixture(); await link(f);
+        const pending = deferred<Awaited<ReturnType<typeof f.handle.context>>>(); f.handle.context.mockReturnValueOnce(pending.promise);
+        const operation = f.editor.onUpdate(f.handle.id, 'new'); const rejected = expect(operation).rejects.toThrow(/chart|session/);
+        await vi.waitFor(() => expect(f.handle.context).toHaveBeenCalled());
+        Object.defineProperty(f.workspace, 'chart', { value: { ...f.chart }, configurable: true });
+        pending.resolve({ strategy: state(999), trades: [], warnings: [] }); await rejected; await f.app.flush();
+        expect(latest()).toBeUndefined(); expect(f.post).not.toHaveBeenCalled();
+    });
+    it('discards chart tick trades that resolve after switching charts', async () => {
+        const f = await fixture(); await f.editor.onRun('source-B');
+        f.root.querySelector<HTMLButtonElement>('[aria-label="Strategy Tester"]')!.click();
+        const pending = deferred<readonly StrategyTrade[]>();
+        f.emit({ ...f.chartRun, title: 'Stale chart', trades: () => pending.promise });
+        Object.defineProperty(f.workspace, 'chart', { value: { ...f.chart }, configurable: true });
+        pending.resolve([]); await vi.waitFor(() => expect(f.onError).toHaveBeenCalled());
+        expect(latest()?.name).toBe('Chart B');
+    });
+    it('removes only the recorded active handle and invalidates its chart callbacks', async () => {
+        const f = await fixture(); await f.editor.onRun('source-B');
+        await f.editor.onRemove!(f.handle.id); expect(f.handle.remove).toHaveBeenCalledOnce();
+        const calls = mocks.results.update.mock.calls.length; f.emit(); await Promise.resolve(); await Promise.resolve();
+        expect(mocks.results.update).toHaveBeenCalledTimes(calls);
+        await expect(f.editor.onUpdate(f.handle.id, 'new')).rejects.toThrow(/chart|session|script/);
+    });
+});
 
 describe('script dock placement', () => {
+    it('starts Chart mode closed while replay, editor and tester remain available', async () => {
+        const f = await fixture(false, false); const dock = f.root.querySelector<HTMLElement>('.local-script-dock')!;
+        expect(dock.hidden).toBe(true); expect(mocks.editorOptions).toBeUndefined();
+        f.root.dispatchEvent(new CustomEvent('local-replay:chrome', { detail: { kind: 'replay-toggle' } }));
+        expect(dock.hidden).toBe(false); expect(dock.dataset.activeTab).toBe('replay');
+        dock.querySelector<HTMLButtonElement>('.local-script-close')!.click();
+        f.root.querySelector<HTMLButtonElement>('[aria-label="Pine Editor"]')!.click();
+        await vi.waitFor(() => expect(mocks.editorOptions).toBeDefined()); expect(dock.hidden).toBe(false);
+        f.root.querySelector<HTMLButtonElement>('[aria-label="Strategy Tester"]')!.click();
+        expect(dock.dataset.activeTab).toBe('tester'); expect(dock.hidden).toBe(false);
+    });
     it('maximizes outside a positioned strip and restores its slot and resized height before close or disposal', async () => {
         const root = document.createElement('div'); root.style.position = 'relative';
         root.innerHTML = '<div class="vela-widget-panels"></div><div class="positioned-strip" style="position:relative;height:49px"><span>Before</span><span>After</span></div>';
@@ -208,7 +320,7 @@ describe('script workspace result ownership', () => {
         expect(discard.hidden).toBe(false); expect(discard.disabled).toBe(true);
         discard.click(); expect(f.app.readCurrentResult()?.snapshot?.source).toBe('source-A');
         await expect(f.editor.onRun('source-B')).rejects.toThrow('Store is full');
-        await expect(f.editor.onUpdate('chart-B', 'changed')).rejects.toThrow('Store is full');
+        await link(f); await expect(f.editor.onUpdate('chart-B', 'changed')).rejects.toThrow('Store is full');
         await expect(f.app.startBacktestForIndicator(f.handle.id, { mode: 'replay' })).rejects.toThrow('Store is full');
         expect(f.chart.runScript).not.toHaveBeenCalled(); expect(f.handle.updateCode).not.toHaveBeenCalled();
         expect(latest()?.name).toBe('Strategy A'); expect(mocks.backtest).toHaveBeenCalledOnce();
@@ -277,7 +389,7 @@ describe('script workspace result ownership', () => {
         f.root.querySelector<HTMLButtonElement>('.local-backtest-export')!.click(); expect(mocks.download).toHaveBeenCalledOnce();
     });
     it('editing a different chart strategy clears ownership of an older full-history snapshot', async () => {
-        const f = await fixture(); await f.editor.onBacktest('source-A', doc('A')); await f.editor.onUpdate('chart-B', 'edited-B');
+        const f = await fixture(); await f.editor.onBacktest('source-A', doc('A')); await link(f); await f.editor.onUpdate('chart-B', 'edited-B');
         expect(latest()).toMatchObject({ name: 'Chart B', state: { netPnl: 30 } });
         expect(f.post.mock.lastCall?.[1].snapshot.source).toBe('source-A');
         expect(f.root.querySelector<HTMLButtonElement>('.local-backtest-export')!.disabled).toBe(true);
@@ -344,6 +456,7 @@ describe('script workspace flush and update handoff', () => {
     });
     it.each([true, false])('drains a pending source update before handoff (success=%s)', async (success) => {
         const f = await fixture(); const pending = deferred<{ ok: boolean; error: Error | null }>();
+        await link(f);
         f.handle.updateCode.mockImplementationOnce(async () => {
             const value = await pending.promise; if (value.ok) f.handle.source = 'new-source'; return value;
         });
