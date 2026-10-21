@@ -1,15 +1,28 @@
 /** Local Replay Studio: shared wire contracts. Times are UTC epoch milliseconds. */
-export interface Bar { time: number; open: number; high: number; low: number; close: number; volume: number }
+export interface Bar {
+    time: number; open: number; high: number; low: number; close: number; volume: number;
+    /** Actual provider identity for unadjusted continuous futures; both fields must travel together. */
+    instrumentId?: string; contract?: string;
+}
 export type Schema = 'ohlcv-1m' | 'ohlcv-1s';
 export interface Instrument { root: string; tickSize: number; pointValue: number }
 export const INSTRUMENTS: Instrument[] = [
     { root: 'NQ', tickSize: 0.25, pointValue: 20 }, { root: 'MNQ', tickSize: 0.25, pointValue: 2 },
     { root: 'ES', tickSize: 0.25, pointValue: 50 }, { root: 'MES', tickSize: 0.25, pointValue: 5 },
+    { root: 'GC', tickSize: 0.1, pointValue: 100 },
 ];
+export interface ContinuousSegment {
+    startIndex: number; endIndex: number; start: number; end: number; instrumentId: string; contract: string;
+}
+export interface ContinuousProvenance {
+    stypeIn: 'continuous'; rollRule: 'volume'; rank: 0; adjustment: 'none'; rollPolicy: 'flatten-prior-close';
+    requestedStart: string; requestedEnd: string; manifestHash: string; segments: ContinuousSegment[];
+}
 export interface DatasetMeta {
     id: string; name: string; symbol: string; schema: Schema; intervalMs: number;
     instrument: Instrument; barCount: number; start: number; end: number;
     source: 'databento' | 'csv' | 'demo'; createdAt: string; checksum: string;
+    continuous?: ContinuousProvenance;
 }
 export type Side = 'buy' | 'sell';
 export interface PropRules {
@@ -80,7 +93,7 @@ export interface PropState {
 export interface Bookmark { id: string; time: number; label: string }
 export interface Session {
     /** Absent for legacy executions; retained once target legs or their provenance are used. */
-    executionVersion?: 2;
+    executionVersion?: 2 | 3;
     id: string; config: SessionConfig; instrument: Instrument; cursor: number;
     status: 'paused' | 'completed' | 'passed' | 'failed'; revision: number;
     createdAt: string; updatedAt: string; account: Account; position: Position | null;

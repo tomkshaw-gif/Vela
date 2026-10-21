@@ -4,6 +4,7 @@ import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { build as bundle } from 'esbuild';
 import { build as buildClient } from 'vite';
+import { bundleMarketStatsWorker, SERVER_EXTERNALS, stageNativeRuntime } from '../../vendor/edge-stats/packaging.mjs';
 
 const [rootArgument, outputArgument, mode] = process.argv.slice(2);
 if (!rootArgument || !outputArgument || !['run', 'develop'].includes(mode)) throw new Error('Invalid local build arguments.');
@@ -15,7 +16,9 @@ if (mode === 'run') {
     });
 }
 await mkdir(output, { recursive: true });
-await bundle({ entryPoints: [join(root, 'local-app/server/index.ts')], outfile: join(output, 'server.mjs'), bundle: true, platform: 'node', format: 'esm', target: 'node24', external: ['node:*'], sourcemap: false, logLevel: 'warning' });
+await bundle({ entryPoints: [join(root, 'local-app/server/index.ts')], outfile: join(output, 'server.mjs'), bundle: true, platform: 'node', format: 'esm', target: 'node24', external: SERVER_EXTERNALS, sourcemap: false, logLevel: 'warning' });
+await bundleMarketStatsWorker(root, output, bundle);
+await stageNativeRuntime(root, output);
 const config = join(root, 'local-app/vite.config.ts');
 await bundle({ entryPoints: [config], outfile: join(output, 'vite.config.mjs'), bundle: true, packages: 'external', platform: 'node', format: 'esm', target: 'node24', define: { 'import.meta.url': JSON.stringify(pathToFileURL(config).href) }, logLevel: 'warning' });
 await buildClient({ configFile: join(output, 'vite.config.mjs'), build: { outDir: join(output, 'client'), emptyOutDir: false } });

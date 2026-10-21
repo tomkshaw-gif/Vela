@@ -5,6 +5,7 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import type { ChartAgentOperation } from './shared/chart-agent';
+import { LocalResearchConnection, registerResearchTools } from './mcp-research';
 
 class ChartOperationError extends Error {}
 
@@ -100,8 +101,10 @@ const style = z.object({ lineColor: z.string().max(40).optional(), lineWidth: z.
     extendLeft: z.boolean().optional(), extendRight: z.boolean().optional(), arrowLeft: z.boolean().optional(), arrowRight: z.boolean().optional() }).strict();
 
 export function createChartMcp(connection: Pick<LocalChartConnection, 'clients' | 'call'> = process.env.VELA_AGENT_PORT
-    ? new LocalChartConnection(process.env.VELA_AGENT_PORT) : new LocalChartConnections()): McpServer {
+    ? new LocalChartConnection(process.env.VELA_AGENT_PORT) : new LocalChartConnections(),
+    research = new LocalResearchConnection()): McpServer {
     const server = new McpServer({ name: 'vela-local-chart', version: '1.1.0' });
+    registerResearchTools(server, research);
     server.registerTool('vela_workspaces', { description: 'List open local Vela replay charts. Copy the exact clientId, sessionId, generation and a cell id into subsequent targets. No future replay data is exposed.',
         inputSchema: z.object({}).strict(), annotations: { readOnlyHint: true, openWorldHint: false } }, async () => {
         try { return { content: [{ type: 'text' as const, text: JSON.stringify(await connection.clients()) }] }; }

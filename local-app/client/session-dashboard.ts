@@ -7,6 +7,7 @@ export interface SessionDashboardCallbacks {
     newSession(): void;
     openSession(id: string): void;
     openChart(): void;
+    openStats?(): void;
     openData(): void;
     importSession(): void;
 }
@@ -68,6 +69,7 @@ export function mountSessionDashboard(host: HTMLElement, callbacks: SessionDashb
     const nav = node('nav', 'sd-nav'); nav.setAttribute('aria-label', 'Workspace modes');
     const home = node('span', 'sd-nav-current', 'Backtesting'); home.setAttribute('aria-current', 'page');
     nav.append(home, button('Chart mode ↗', 'sd-nav-button', guarded(() => callbacks.openChart())), button('Data & settings', 'sd-nav-button', guarded(() => callbacks.openData())));
+    if (callbacks.openStats) nav.insertBefore(button('Market Stats', 'sd-nav-button', guarded(() => callbacks.openStats!())), nav.lastChild);
     const local = node('div', 'sd-sidebar-note'); local.append(node('span', 'sd-local-dot'), node('span', '', 'Local workspace'), node('small', '', 'Simulated trading'));
     const sidebarFooter = node('div', 'sd-sidebar-footer');
     const disposeUpdates = mountDesktopUpdates(sidebarFooter);

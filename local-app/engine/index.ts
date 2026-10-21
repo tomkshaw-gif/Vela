@@ -383,6 +383,22 @@ function advance(s: Session, bars: Bar[], end: number): void {
     const endIndex = s.config.endIndex ?? bars.length;
     for (let index = s.cursor + 1; index <= end && s.status === 'paused'; index++) {
         const bar = bars[index]!;
+        const previous = index > 0 ? bars[index - 1]! : undefined;
+        const hasIdentity = (value: Bar | undefined) => value?.instrumentId !== undefined || value?.contract !== undefined;
+        for (const value of [previous, bar]) {
+            if (hasIdentity(value) && (!/^[1-9]\d{0,9}$/.test(value!.instrumentId ?? '') || !new RegExp(`^${s.instrument.root}[FGHJKMNQUVXZ]\\d{1,4}$`).test(value!.contract ?? ''))) throw new Error('Continuous source identity is invalid');
+        }
+        if (previous && hasIdentity(previous) !== hasIdentity(bar)) throw new Error('Continuous source identity is incomplete');
+        if (previous?.instrumentId && previous.contract !== bar.contract) {
+            // Read only the identity of the next source record before closing at the
+            // already revealed old contract. Its OHLC cannot price the old position.
+            cancelWorking(s); flatten(s, previous.close, previous.time, 'Continuous contract roll'); mark(s, previous.close);
+            const reason = riskReason(s);
+            if (reason) fail(s, previous.close, previous.time, reason); else pass(s, previous.close, previous.time);
+            const point = s.equityCurve.at(-1);
+            if (point?.time === previous.time) { point.balance = s.account.balance; point.equity = s.account.equity; }
+            if (s.status !== 'paused') break;
+        }
         validateBar(bar, s.instrument);
         if (index > 0 && bars[index - 1]!.time >= bar.time) throw new Error('Source bars must have strictly increasing times');
         s.cursor = index;
@@ -432,12 +448,13 @@ function amend(s: Session, command: Extract<Command, { type: 'amend' }>, referen
         else p.takeProfits = validated.takeProfits;
         if (p.initialRisk === undefined && p.stopLoss !== undefined) p.initialRisk = Math.max(0, (p.avgPrice - p.stopLoss) * sign(p.side) * p.qty * s.instrument.pointValue) || undefined;
     }
-    if (command.takeProfits !== undefined) s.executionVersion = 2;
+    if (command.takeProfits !== undefined && s.executionVersion !== 3) s.executionVersion = 2;
 }
 
 /** Commands return a new state. A failed validation never partially mutates the supplied session. */
 export function applyCommand(input: Session, bars: Bar[], rawCommand: Command): Session {
-    const s = validateStoredSession(input, bars, input.instrument);
+    const continuous = bars[0]?.instrumentId !== undefined || bars[0]?.contract !== undefined;
+    const s = validateStoredSession(continuous ? { ...input, executionVersion: 3 } : input, bars, input.instrument);
     const raw = object(rawCommand, 'Command');
     const type = choice(raw.type, ['advance', 'advanceTo', 'place', 'cancel', 'close', 'reverse', 'amend', 'bookmark', 'layout', 'rename'], 'Command type');
     if (s.status !== 'paused' && !['bookmark', 'layout', 'rename'].includes(type)) throw new Error('This attempt is finished; create a new attempt to trade again');
@@ -461,7 +478,7 @@ export function applyCommand(input: Session, bars: Bar[], rawCommand: Command): 
         case 'place': {
             const draft = validateDraft(command.order, s.instrument, reference);
             bracketCompatibility(s, draft);
-            if (draft.takeProfits !== undefined) s.executionVersion = 2;
+            if (draft.takeProfits !== undefined && s.executionVersion !== 3) s.executionVersion = 2;
             queue(s, draft, time); break;
         }
         case 'cancel': {

@@ -1,0 +1,64 @@
+{
+  "name": "@luxalgo/edge-stats",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "description": "Pinned official statistics engine, report presets and local inspection/export helpers.",
+  "exports": {
+    ".": {
+      "types": "./index.ts",
+      "default": "./index.ts"
+    },
+    "./registry": {
+      "types": "./src/registry/index.ts",
+      "default": "./src/registry/index.ts"
+    },
+    "./presets": {
+      "types": "./src/presets/presets.ts",
+      "default": "./src/presets/presets.ts"
+    },
+    "./session-bars": {
+      "types": "./src/query/session-bars.ts",
+      "default": "./src/query/session-bars.ts"
+    },
+    "./export": {
+      "types": "./src/query/export.ts",
+      "default": "./src/query/export.ts"
+    },
+    "./live/replay": {
+      "types": "./src/live/replay.ts",
+      "default": "./src/live/replay.ts"
+    },
+    "./live/types": {
+      "types": "./src/live/types.ts",
+      "default": "./src/live/types.ts"
+    },
+    "./preset-catalog": {
+      "types": "./preset-catalog.d.mts",
+      "default": "./preset-catalog.mjs"
+    },
+    "./query-tools": {
+      "types": "./query-tools.d.mts",
+      "default": "./query-tools.mjs"
+    },
+    "./calendar-data": {
+      "types": "./calendar-data.d.mts",
+      "default": "./calendar-data.mjs"
+    },
+    "./events": {
+      "types": "./src/events.ts",
+      "default": "./src/events.ts"
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/LuxAlgo/edge-stats",
+    "directory": "packages/core"
+  },
+  "dependencies": {
+    "@duckdb/node-api": "1.5.5-r.4",
+    "luxon": "3.7.2",
+    "zod": "4.6.7"
+  }
+}

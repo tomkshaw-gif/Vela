@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 import { build as buildClient } from 'vite';
 import { buildIcon } from './icon.mjs';
+import { bundleMarketStatsWorker, edgeStatsNotices, SERVER_EXTERNALS, stageNativeRuntime } from '../../vendor/edge-stats/packaging.mjs';
 
 const directory = dirname(fileURLToPath(import.meta.url)); const root = resolve(directory, '../..');
 const stage = join(directory, 'staging'); const app = join(stage, 'app'); const runtime = join(stage, 'app-runtime');
@@ -24,7 +25,9 @@ await writeFile(join(app, 'package.json'), JSON.stringify({ name: 'vela-desktop'
 for (const name of ['main.cjs', 'preload.cjs', 'lifecycle.cjs', 'updates.cjs']) await copyFile(join(directory, name), join(app, name));
 await build({ entryPoints: [join(directory, 'updater.cjs')], outfile: join(app, 'updater.cjs'), bundle: true, platform: 'node', format: 'cjs', target: 'node24', external: ['electron', 'node:*'], logLevel: 'warning' });
 await copyFile(join(directory, 'backend.mjs'), join(runtime, 'backend.mjs'));
-await build({ entryPoints: [join(root, 'local-app/server/index.ts')], outfile: join(runtime, 'server.mjs'), bundle: true, platform: 'node', format: 'esm', target: 'node24', external: ['node:*'], logLevel: 'warning' });
+await build({ entryPoints: [join(root, 'local-app/server/index.ts')], outfile: join(runtime, 'server.mjs'), bundle: true, platform: 'node', format: 'esm', target: 'node24', external: SERVER_EXTERNALS, logLevel: 'warning' });
+await bundleMarketStatsWorker(root, runtime, build);
+await stageNativeRuntime(root, runtime);
 const previous = process.env.VELA_DESKTOP_EXTERNAL_APPEARANCE; process.env.VELA_DESKTOP_EXTERNAL_APPEARANCE = '1';
 try { await buildClient({ configFile: join(root, 'local-app/vite.config.ts'), build: { outDir: join(runtime, 'client'), emptyOutDir: true } }); }
 finally { if (previous === undefined) delete process.env.VELA_DESKTOP_EXTERNAL_APPEARANCE; else process.env.VELA_DESKTOP_EXTERNAL_APPEARANCE = previous; }
@@ -32,6 +35,7 @@ for (const name of ['LICENSE', 'NOTICE']) await copyFile(join(root, name), join(
 const notices = ['Vela desktop combines the Apache-2.0 Vela library with AGPL-3.0-only scripting addons.',
     'Source and updates: https://github.com/tomkshaw-gif/Vela',
     'Machine-local appearance extensions are separate from this installer.'];
+notices.push(...await edgeStatsNotices(root));
 for (const name of ['@luxalgo/vela-pinets', 'pinets', 'electron-updater']) {
     const folder = join(root, 'node_modules', name); const dependency = JSON.parse(await readFile(join(folder, 'package.json'), 'utf8'));
     notices.push(`\n${name} ${dependency.version} (${dependency.license})`);

@@ -109,6 +109,7 @@
     "desktop:appearance": "node local-app/electron/install-appearance.mjs"
   },
   "devDependencies": {
+    "@types/luxon": "3.7.6",
     "@types/node": "^24.19.2",
     "electron": "44.9.2",
     "electron-builder": "26.15.3",
@@ -123,6 +124,9 @@
     "vitest": "^4.1.0"
   },
   "dependencies": {
+    "@duckdb/node-api": "1.5.5-r.4",
+    "@luxalgo/edge-stats": "file:vendor/edge-stats",
+    "luxon": "3.7.2",
     "@codemirror/autocomplete": "6.20.4",
     "@codemirror/commands": "6.11.1",
     "@codemirror/language": "6.13.1",

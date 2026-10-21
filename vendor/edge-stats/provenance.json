@@ -1,0 +1,697 @@
+{
+  "repository": "https://github.com/LuxAlgo/edge-stats",
+  "commit": "a48259887962d0f67a27d2b0815e2df9a52efca5",
+  "version": "0.1.0",
+  "license": "MIT",
+  "sourceRoot": "packages/core",
+  "verifiedAt": "2026-10-21",
+  "sourceFiles": [
+    {
+      "path": "DATA_LICENSE",
+      "upstreamPath": "DATA_LICENSE",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/DATA_LICENSE",
+      "sha256": "37eea09b8897aec17f79e947ccbcd5fc7271bdfbe5a0fd6a71f4c7e851d781d1",
+      "gitBlob": "a0b71b931d5fc67ca561cd94fe35496de04d16c8",
+      "bytes": 638,
+      "license": "CC-BY-4.0"
+    },
+    {
+      "path": "LICENSE",
+      "upstreamPath": "LICENSE",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/LICENSE",
+      "sha256": "1b008cf586117be793d621e875f6270aca14a8c7c31914e2371b39b6d6c01631",
+      "bytes": 1076
+    },
+    {
+      "path": "data/events/cpi.json",
+      "upstreamPath": "data/events/cpi.json",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/data/events/cpi.json",
+      "sha256": "f0077c53faf809c4582b9aac79940ec78fb19099272a40d9524962b650874b54",
+      "gitBlob": "dab1fdd37564ace7c0f8ce2f9a5e07cd5eae4cef",
+      "bytes": 5269,
+      "license": "CC-BY-4.0"
+    },
+    {
+      "path": "data/events/fomc.json",
+      "upstreamPath": "data/events/fomc.json",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/data/events/fomc.json",
+      "sha256": "50b4c2e9f1b448c78b529e0c0d2980045545ecca524a172439aae98b10421634",
+      "gitBlob": "b4f16326de788fd44a014aa0c83527f49797e750",
+      "bytes": 3655,
+      "license": "CC-BY-4.0"
+    },
+    {
+      "path": "data/events/nfp.json",
+      "upstreamPath": "data/events/nfp.json",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/data/events/nfp.json",
+      "sha256": "391f36c62acbf36406dc116ae6635c73d3f91d6afb2e6142448df3e104feac7f",
+      "gitBlob": "178d3ad6f7615a5852933a1f66564935bf8120df",
+      "bytes": 6182,
+      "license": "CC-BY-4.0"
+    },
+    {
+      "path": "data/events/opex.json",
+      "upstreamPath": "data/events/opex.json",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/data/events/opex.json",
+      "sha256": "f5a3bbbb873ae5cb521f42aafc291aedfca3e7078a287e1689b84fe5112f109a",
+      "gitBlob": "2dddbf60b607d7826d73dd5681f0c48f5195442c",
+      "bytes": 4345,
+      "license": "CC-BY-4.0"
+    },
+    {
+      "path": "data/holidays/cme.json",
+      "upstreamPath": "data/holidays/cme.json",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/data/holidays/cme.json",
+      "sha256": "6ece8004961f4cf81fdd167fa093ea8d76bcc36fd634ba85cc0da765644877b3",
+      "gitBlob": "913073a357cf0b57f660cfd406cc1cd97bdd89eb",
+      "bytes": 21270,
+      "license": "CC-BY-4.0"
+    },
+    {
+      "path": "data/holidays/nyse.json",
+      "upstreamPath": "data/holidays/nyse.json",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/data/holidays/nyse.json",
+      "sha256": "099f88296c0df346730c864890006fdf7fa90f53b3c5e5581756829e2c3ca527",
+      "gitBlob": "93a610f48d02deac94d8d0f7e7b2a4d6efce7851",
+      "bytes": 16872,
+      "license": "CC-BY-4.0"
+    },
+    {
+      "path": "presets/day-after-event.json",
+      "upstreamPath": "presets/day-after-event.json",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/presets/day-after-event.json",
+      "sha256": "72f7ed866a1fbfb77099cb7feb4fc40118ad6286bef2b7ce7c9ad48a43f7b337",
+      "gitBlob": "bc0eb7df95a9b4365662e86f2b0c951ecbe11586",
+      "bytes": 1015,
+      "license": "MIT"
+    },
+    {
+      "path": "presets/day-before-event.json",
+      "upstreamPath": "presets/day-before-event.json",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/presets/day-before-event.json",
+      "sha256": "ca6de62232982ef80790af1310e35189e92091030360438ad0cdad4c4eed19bf",
+      "gitBlob": "0e72b5d3f278105b18a55482a6471d9358e246f1",
+      "bytes": 1101,
+      "license": "MIT"
+    },
+    {
+      "path": "presets/day-of-week.json",
+      "upstreamPath": "presets/day-of-week.json",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/presets/day-of-week.json",
+      "sha256": "f7fe9f957f6fe3ea094f80a670f37417213debb46fc0848fac5a27f47548c582",
+      "gitBlob": "aa184cc357cb352ea32fa462a205e2b86ea15225",
+      "bytes": 992,
+      "license": "MIT"
+    },
+    {
+      "path": "presets/doji-follow-through.json",
+      "upstreamPath": "presets/doji-follow-through.json",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/presets/doji-follow-through.json",
+      "sha256": "19a85b739f9d9f44c82ad9a506f9f077464cf638b0bd3722a5f5213785247b11",
+      "gitBlob": "214b93236d30418a7dd82c3cf5f4726d0cc06a9b",
+      "bytes": 934,
+      "license": "MIT"
+    },
+    {
+      "path": "presets/engulfing-bear.json",
+      "upstreamPath": "presets/engulfing-bear.json",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/presets/engulfing-bear.json",
+      "sha256": "91f20d95dd4654a51bc45c35eb19ade7b49767147b625dee48899f7bc8ce5e2b",
+      "gitBlob": "9828a4e2d2e61901608a5f21d3e0e7549515a2a1",
+      "bytes": 1059,
+      "license": "MIT"
+    },
+    {
+      "path": "presets/engulfing-bull.json",
+      "upstreamPath": "presets/engulfing-bull.json",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/presets/engulfing-bull.json",
+      "sha256": "e7bf715a95817ee94e32474fa81d374796474e35b7ca49385747f08b18521b16",
+      "gitBlob": "3d2ffaae9173cb736e44ee337fa0a74088cbcb26",
+      "bytes": 1054,
+      "license": "MIT"
+    },
+    {
+      "path": "presets/event-day-cpi.json",
+      "upstreamPath": "presets/event-day-cpi.json",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/presets/event-day-cpi.json",
+      "sha256": "3b8682d33dacc026b3dbd26555ddccb3b98543829cd3a8a40b5b1bd7e4d8e688",
+      "gitBlob": "a1d367fbaa420ad99983d4d37e75ac4eef298159",
+      "bytes": 808,
+      "license": "MIT"
+    },
+    {
+      "path": "presets/event-day-fomc.json",
+      "upstreamPath": "presets/event-day-fomc.json",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/presets/event-day-fomc.json",
+      "sha256": "ae2a05851a5bfe18ee35cb7fb6b1e23253883a7085d6e66a66dd5d71c1217d8c",
+      "gitBlob": "5715bd63d0a1a5ee0a97c6522d986dbd11e290d7",
+      "bytes": 865,
+      "license": "MIT"
+    },
+    {
+      "path": "presets/event-day-nfp.json",
+      "upstreamPath": "presets/event-day-nfp.json",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/presets/event-day-nfp.json",
+      "sha256": "3113e287d419f75144c773d0eee9faa55c840d271903b62e07b6b5da803dc78f",
+      "gitBlob": "170a3b31784b62425b2ee3c40c022787900b7d90",
+      "bytes": 824,
+      "license": "MIT"
+    },
+    {
+      "path": "presets/event-day-opex.json",
+      "upstreamPath": "presets/event-day-opex.json",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/presets/event-day-opex.json",
+      "sha256": "a85835cd60b37598b171839f0e0ad5ef18ad428b46e2a4a0572123a5d375bdeb",
+      "gitBlob": "a59862fae4c72412fc454da85626b09849e28b8d",
+      "bytes": 844,
+      "license": "MIT"
+    },
+    {
+      "path": "presets/fvg-below-green.json",
+      "upstreamPath": "presets/fvg-below-green.json",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/presets/fvg-below-green.json",
+      "sha256": "7840201600fcd374c27ecaae0f17a884f64bbad538e1e2daa54b9f95c7d30493",
+      "gitBlob": "5528136828a3582dbfaff14b4c2d9e74677914d1",
+      "bytes": 977,
+      "license": "MIT"
+    },
+    {
+      "path": "presets/fvg-magnet.json",
+      "upstreamPath": "presets/fvg-magnet.json",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/presets/fvg-magnet.json",
+      "sha256": "5a029f726cac489fbaa06f109c35895bf75fdc2807ac2070304d70f5f93a43bf",
+      "gitBlob": "7acd4ced4b57fc5b052319207e3679116318ee34",
+      "bytes": 1732,
+      "license": "MIT"
+    },
+    {
+      "path": "presets/gap-and-go.json",
+      "upstreamPath": "presets/gap-and-go.json",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/presets/gap-and-go.json",
+      "sha256": "863db0dbcd73b1bf56e857e890fbe6947813cd8ae00d77f901f17b9751bd7903",
+      "gitBlob": "cb189c00caf6afca941e7acb2bf5daa7481a038a",
+      "bytes": 1528,
+      "license": "MIT"
+    },
+    {
+      "path": "presets/gap-fill-by-direction.json",
+      "upstreamPath": "presets/gap-fill-by-direction.json",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/presets/gap-fill-by-direction.json",
+      "sha256": "19d91d4c1822954e062c79e2cb9b5052bdce2280f8c16994fab96819693c4ef2",
+      "gitBlob": "243addaa186b98a4e0c8c054e1b8dcd0e8c428aa",
+      "bytes": 1163,
+      "license": "MIT"
+    },
+    {
+      "path": "presets/gap-fill-by-size.json",
+      "upstreamPath": "presets/gap-fill-by-size.json",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/presets/gap-fill-by-size.json",
+      "sha256": "875ef043c4e0d39db9037734875c8502ad847c83205cf89260ed0f11b746b62b",
+      "gitBlob": "ef6cb717ec40c436cddddb8b055692dad8a83973",
+      "bytes": 1216,
+      "license": "MIT"
+    },
+    {
+      "path": "presets/gap-fill-by-weekday.json",
+      "upstreamPath": "presets/gap-fill-by-weekday.json",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/presets/gap-fill-by-weekday.json",
+      "sha256": "f5a1e769938fe2078a31cc8350cee909a7c5ac428ec07a44d94ac0f2b450e832",
+      "gitBlob": "02b4e32676dedce07b00c8f4791dd80e26339d97",
+      "bytes": 1444,
+      "license": "MIT"
+    },
+    {
+      "path": "presets/gap-fill-time.json",
+      "upstreamPath": "presets/gap-fill-time.json",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/presets/gap-fill-time.json",
+      "sha256": "620dcb3aae109e0e5a18b8b22738fe34c048307a6edbccec4b5866b2c6106fbd",
+      "gitBlob": "0c516e418663fb4d7be4885bf599a67b00fd489f",
+      "bytes": 1383,
+      "license": "MIT"
+    },
+    {
+      "path": "presets/gap-fill.json",
+      "upstreamPath": "presets/gap-fill.json",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/presets/gap-fill.json",
+      "sha256": "6c4b582e91e9922b239a2eafbda8464de31acb0693a7deb96f24bc77606122c4",
+      "gitBlob": "a10b0854db0a047f62904481019fab626b3f3302",
+      "bytes": 1478,
+      "license": "MIT"
+    },
+    {
+      "path": "presets/gap-reversal.json",
+      "upstreamPath": "presets/gap-reversal.json",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/presets/gap-reversal.json",
+      "sha256": "43c14ab58fc0e80170d8d608f50b99697c2ae5ceb8c2afbe7714f2dcdc67f32d",
+      "gitBlob": "cfc056a4f22ad3d258194cecf3a635c52262fd08",
+      "bytes": 1318,
+      "license": "MIT"
+    },
+    {
+      "path": "presets/green-rate.json",
+      "upstreamPath": "presets/green-rate.json",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/presets/green-rate.json",
+      "sha256": "713995197bb1e8264419fbc1fd2a9595703c684511016790ed45566f4cc4ab31",
+      "gitBlob": "b251e90a46fbc1ae2d38c44a43dbb2defa94e062",
+      "bytes": 976,
+      "license": "MIT"
+    },
+    {
+      "path": "presets/high-time.json",
+      "upstreamPath": "presets/high-time.json",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/presets/high-time.json",
+      "sha256": "c8601cc3b5fc7fe60adecbcb0230df177fb01907a1df27f0b40617e88133d63d",
+      "gitBlob": "f368da638600f045d580c04f4eb687daa7cbac81",
+      "bytes": 1121,
+      "license": "MIT"
+    },
+    {
+      "path": "presets/ib-extension.json",
+      "upstreamPath": "presets/ib-extension.json",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/presets/ib-extension.json",
+      "sha256": "07b9d436431dac7a75ce47386e33151c421699cbd5380afeea0d956fa9148c52",
+      "gitBlob": "c9c58346c366dc491fd25369a1f92b733fb1700e",
+      "bytes": 1323,
+      "license": "MIT"
+    },
+    {
+      "path": "presets/initial-balance.json",
+      "upstreamPath": "presets/initial-balance.json",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/presets/initial-balance.json",
+      "sha256": "14d83784361a23cbd7a169d2539e00cd5029d8b9bfcc7303aa58caa7986b18a4",
+      "gitBlob": "f36ac8c49112845b1814d3602ab405ec87c16ddf",
+      "bytes": 1084,
+      "license": "MIT"
+    },
+    {
+      "path": "presets/inside-day.json",
+      "upstreamPath": "presets/inside-day.json",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/presets/inside-day.json",
+      "sha256": "376e59dee19cca82a94541f446770cc6e42d7ba1f467d8fea6bf3e37a1118584",
+      "gitBlob": "8e3fd482f8a3265b1206b8d671eeaf6666fdb561",
+      "bytes": 999,
+      "license": "MIT"
+    },
+    {
+      "path": "presets/low-time.json",
+      "upstreamPath": "presets/low-time.json",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/presets/low-time.json",
+      "sha256": "54b67e6498eb110fa0523dbc5178151cb7011602735e746636189c2d585d17b7",
+      "gitBlob": "4f1cf9315e3be9eafaad6847022f31f0c66ac60a",
+      "bytes": 1039,
+      "license": "MIT"
+    },
+    {
+      "path": "presets/month-of-year.json",
+      "upstreamPath": "presets/month-of-year.json",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/presets/month-of-year.json",
+      "sha256": "4a15eb2b20612ebf02bf0c413230cc58e275a9d8ea43a282873f1693568f2d5f",
+      "gitBlob": "e7995ed2f8d9539ef3940530f005e209981a5ff8",
+      "bytes": 940,
+      "license": "MIT"
+    },
+    {
+      "path": "presets/nr7-expansion.json",
+      "upstreamPath": "presets/nr7-expansion.json",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/presets/nr7-expansion.json",
+      "sha256": "20a5113dbf4653a9ef0997ca897e19c685e0c50391697105f0595b4117ef3796",
+      "gitBlob": "89f4b0adfcec5938d526f74f57f04d869c6e319f",
+      "bytes": 1159,
+      "license": "MIT"
+    },
+    {
+      "path": "presets/orb-by-direction.json",
+      "upstreamPath": "presets/orb-by-direction.json",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/presets/orb-by-direction.json",
+      "sha256": "facea35a6fee0f526bb4287b831d64aa3576e5e0c3504caecfb028fd4cc08459",
+      "gitBlob": "41b8f0874263ede4e99c1e16ecfcee4a931da1f2",
+      "bytes": 1247,
+      "license": "MIT"
+    },
+    {
+      "path": "presets/orb-false-break.json",
+      "upstreamPath": "presets/orb-false-break.json",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/presets/orb-false-break.json",
+      "sha256": "14a27ed1a212626f1e14dd77084fb60986f7dc3618c8d4975ef37d164857c9a8",
+      "gitBlob": "b3a5b4498079cea6dcb08e414bf398a99e0557be",
+      "bytes": 1362,
+      "license": "MIT"
+    },
+    {
+      "path": "presets/orb-target.json",
+      "upstreamPath": "presets/orb-target.json",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/presets/orb-target.json",
+      "sha256": "1a9be52e0aadf9f6712676007ab1056fb5b97e2e2c2485cce33d30ce433f6706",
+      "gitBlob": "6f94a7751b7a4f1122fab090f00ff62d196c263c",
+      "bytes": 1489,
+      "license": "MIT"
+    },
+    {
+      "path": "presets/orb-time-to-break.json",
+      "upstreamPath": "presets/orb-time-to-break.json",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/presets/orb-time-to-break.json",
+      "sha256": "bccf898adfd8d6ad0aea4d847eb6d168950dfb823b2c5146ee08ee11395be856",
+      "gitBlob": "5bae83f5bff507d6dfe8a1af2081e2f509abc39a",
+      "bytes": 1247,
+      "license": "MIT"
+    },
+    {
+      "path": "presets/orb.json",
+      "upstreamPath": "presets/orb.json",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/presets/orb.json",
+      "sha256": "a7467f0cf150cd9ed3727a6bbb6a0d44de12acd90da1d847c89d19d52e891c3b",
+      "gitBlob": "bb2f17273d015473910d297f26d63147dd0315b7",
+      "bytes": 1165,
+      "license": "MIT"
+    },
+    {
+      "path": "presets/outside-day.json",
+      "upstreamPath": "presets/outside-day.json",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/presets/outside-day.json",
+      "sha256": "e2217bf484a32d5923adaf0fd396ed36513e47dda8ee12d7d70eecb50158b626",
+      "gitBlob": "f8a8beb6fb559670f74106e1aa31f8c2df5bcf1d",
+      "bytes": 875,
+      "license": "MIT"
+    },
+    {
+      "path": "presets/prev-high-break-hold.json",
+      "upstreamPath": "presets/prev-high-break-hold.json",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/presets/prev-high-break-hold.json",
+      "sha256": "e3aa9bfb9e5d0662b2ca0ae2f5f108d1628c0145c62ce5996e168c9d2b10b3c5",
+      "gitBlob": "9751adf409cde9c3e10c88ccfaaa5930561f5ec2",
+      "bytes": 906,
+      "license": "MIT"
+    },
+    {
+      "path": "presets/prev-high-touch-by-open.json",
+      "upstreamPath": "presets/prev-high-touch-by-open.json",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/presets/prev-high-touch-by-open.json",
+      "sha256": "3630d709db800e47e62704fbed8b61e2999ba1c91f49443ab5e934a22233e79a",
+      "gitBlob": "410e9c568c186ea3977e36ab060a79c9b019734a",
+      "bytes": 1534,
+      "license": "MIT"
+    },
+    {
+      "path": "presets/prev-low-break-hold.json",
+      "upstreamPath": "presets/prev-low-break-hold.json",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/presets/prev-low-break-hold.json",
+      "sha256": "c5dd11837a5a51da9af0c7b0a6a622d000990650c9294cea11e7bb07e516f760",
+      "gitBlob": "d6bf37a159cbe9ac145cce902770a7ca63cb20e6",
+      "bytes": 828,
+      "license": "MIT"
+    },
+    {
+      "path": "presets/prev-low-touch.json",
+      "upstreamPath": "presets/prev-low-touch.json",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/presets/prev-low-touch.json",
+      "sha256": "60f8119bbb7209cd81b0ea3d12a3dc6d72f0e7a24634fbefac604a9212ee7206",
+      "gitBlob": "2e2b77c10853d5cc639a8ddc850badbe6e35378b",
+      "bytes": 1434,
+      "license": "MIT"
+    },
+    {
+      "path": "presets/prev-range.json",
+      "upstreamPath": "presets/prev-range.json",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/presets/prev-range.json",
+      "sha256": "4a83ab5bbdf8e3ad6537d009a7cb1e6eacaa4c90778f292984b023975edb250b",
+      "gitBlob": "f7c78a83082751193b1ba09bf67ca161a89424d9",
+      "bytes": 1186,
+      "license": "MIT"
+    },
+    {
+      "path": "presets/quiet-then-wild.json",
+      "upstreamPath": "presets/quiet-then-wild.json",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/presets/quiet-then-wild.json",
+      "sha256": "b0f60b4b19bb808eed6f42b704017fa3b2904b1e2a918f3840e9aae1ab031e12",
+      "gitBlob": "f8c83294926e779fc281b9c855a25ad93e3c6497",
+      "bytes": 1254,
+      "license": "MIT"
+    },
+    {
+      "path": "presets/range-vs-atr.json",
+      "upstreamPath": "presets/range-vs-atr.json",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/presets/range-vs-atr.json",
+      "sha256": "81bd81a4e0108eb2a80d51fc82a639934202f8c29125c052e838548b292ebaf3",
+      "gitBlob": "d3694541f63db3cb5f1c5a11c6e98cfbc000853a",
+      "bytes": 1099,
+      "license": "MIT"
+    },
+    {
+      "path": "presets/streak-continuation.json",
+      "upstreamPath": "presets/streak-continuation.json",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/presets/streak-continuation.json",
+      "sha256": "7ba967cb176284565da5d750238b71083293a2a2268e7bd641b7475a8e39a7dd",
+      "gitBlob": "aea8ef03df8d246b5b2b2dac8f7f2bdb106f907f",
+      "bytes": 1122,
+      "license": "MIT"
+    },
+    {
+      "path": "presets/streak-reversion.json",
+      "upstreamPath": "presets/streak-reversion.json",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/presets/streak-reversion.json",
+      "sha256": "e8f24584e9b8ae502069e3b9912e2aa59f9082e548b74226430cd8dd9a121fff",
+      "gitBlob": "f7d0f2200ea2b23716c6fe36519ec03acf3d5f54",
+      "bytes": 1081,
+      "license": "MIT"
+    },
+    {
+      "path": "src/calendar/data.ts",
+      "upstreamPath": "packages/core/src/calendar/data.ts",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/packages/core/src/calendar/data.ts",
+      "sha256": "b15127282d2fac4c322f9400af0ad560a1c9a7282140a8f3c96c39498797601d",
+      "bytes": 2563
+    },
+    {
+      "path": "src/calendar/index.ts",
+      "upstreamPath": "packages/core/src/calendar/index.ts",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/packages/core/src/calendar/index.ts",
+      "sha256": "ebd39d90fc115b8e50fd8eb9187bc6711ede8e5b064951a8e7d83977234d4e0c",
+      "bytes": 907
+    },
+    {
+      "path": "src/calendar/sessions.ts",
+      "upstreamPath": "packages/core/src/calendar/sessions.ts",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/packages/core/src/calendar/sessions.ts",
+      "sha256": "fd08a95f0e4bf882762d0ccb45796f54461621bbab0ed62d53454504ddd02fe3",
+      "bytes": 5080
+    },
+    {
+      "path": "src/calendar/types.ts",
+      "upstreamPath": "packages/core/src/calendar/types.ts",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/packages/core/src/calendar/types.ts",
+      "sha256": "9b1b2afc02445b2178edbbac9c4d2c219d4d05a9befe4abb9292d4a4a439fd5b",
+      "bytes": 887
+    },
+    {
+      "path": "src/config.ts",
+      "upstreamPath": "packages/core/src/config.ts",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/packages/core/src/config.ts",
+      "sha256": "71d8ce7ddea88d83daf11c241de8c67b3667a44d53557342d93244206d0547cf",
+      "bytes": 4978
+    },
+    {
+      "path": "src/events.ts",
+      "upstreamPath": "packages/core/src/events.ts",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/packages/core/src/events.ts",
+      "sha256": "3f364f55cb971fe17896dcdd31132baf162abbcae50c271d40bc07026c23e5e2",
+      "gitBlob": "888c99627bc9d894d88128225e9ce8f194faeffb",
+      "bytes": 1534,
+      "license": "MIT"
+    },
+    {
+      "path": "src/features/derive.ts",
+      "upstreamPath": "packages/core/src/features/derive.ts",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/packages/core/src/features/derive.ts",
+      "sha256": "a10be981c39d843357ac6334901a03f84cdb3b390b6df697db786a7c6059ccf6",
+      "bytes": 23946
+    },
+    {
+      "path": "src/features/schema.ts",
+      "upstreamPath": "packages/core/src/features/schema.ts",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/packages/core/src/features/schema.ts",
+      "sha256": "896a72b2d158e9ea0fb13b5da6a872c2b7edf69e07e2bfbd5f261e13dd6e9e92",
+      "bytes": 4264
+    },
+    {
+      "path": "src/live/replay.ts",
+      "upstreamPath": "packages/core/src/live/replay.ts",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/packages/core/src/live/replay.ts",
+      "sha256": "2c3c0f0ffc969e8a29165f7bf19215ce7a1719f04ad82164a0c6c3efe18a3af3",
+      "gitBlob": "04593eaaf8ed7d44b75a1c5f5c0471c6bd4d8656",
+      "bytes": 2531,
+      "license": "MIT"
+    },
+    {
+      "path": "src/live/types.ts",
+      "upstreamPath": "packages/core/src/live/types.ts",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/packages/core/src/live/types.ts",
+      "sha256": "f0eddc1579993122dea07c9826246205695a8d0c2aa3c13acaeb37b53061d299",
+      "gitBlob": "58274b00b6b5a6603b84f3ebae03d76785bc8923",
+      "bytes": 2888,
+      "license": "MIT"
+    },
+    {
+      "path": "src/presets/presets.ts",
+      "upstreamPath": "packages/core/src/presets/presets.ts",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/packages/core/src/presets/presets.ts",
+      "sha256": "1c502216fd84e53be763a8a219fdbc7fb608697f1ea3f1269515c9e9d17b2578",
+      "gitBlob": "848f908bf62867b81a4c060cb511f73576ca0b10",
+      "bytes": 6817,
+      "license": "MIT"
+    },
+    {
+      "path": "src/query/ast.ts",
+      "upstreamPath": "packages/core/src/query/ast.ts",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/packages/core/src/query/ast.ts",
+      "sha256": "36406a3eab200bd6d8b7b3e0b1c41e56f2b254c62a1e32b697fc86eb90c10843",
+      "bytes": 2034
+    },
+    {
+      "path": "src/query/compile.ts",
+      "upstreamPath": "packages/core/src/query/compile.ts",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/packages/core/src/query/compile.ts",
+      "sha256": "d559ba401d80d0607b908814fd4b1311f52075b57a69c1f6427fb0535ecb0c9e",
+      "bytes": 10367
+    },
+    {
+      "path": "src/query/execute.ts",
+      "upstreamPath": "packages/core/src/query/execute.ts",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/packages/core/src/query/execute.ts",
+      "sha256": "96a81487d00cf18caf4a953a976ce4d795e30b620a8658490a921d36f980f76d",
+      "bytes": 10629
+    },
+    {
+      "path": "src/query/export.ts",
+      "upstreamPath": "packages/core/src/query/export.ts",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/packages/core/src/query/export.ts",
+      "sha256": "df6d9e64083bf23738af50af0cb18e0cfc1fd9b1d434f6c90e06207ea564c6ab",
+      "gitBlob": "18eb4f1642ab9e8eb7ecf5eef05bebf6030b00bf",
+      "bytes": 3146,
+      "license": "MIT"
+    },
+    {
+      "path": "src/query/lexer.ts",
+      "upstreamPath": "packages/core/src/query/lexer.ts",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/packages/core/src/query/lexer.ts",
+      "sha256": "a26b52d916c2898c26e4d01256b9cf746ebece04355e731d47d7a0b63ccf36e6",
+      "bytes": 3663
+    },
+    {
+      "path": "src/query/normalize.ts",
+      "upstreamPath": "packages/core/src/query/normalize.ts",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/packages/core/src/query/normalize.ts",
+      "sha256": "3d95a9fa4e570863b611a3c0af2d28ebac3f12e15f8b4c1b3629c15d1f908318",
+      "bytes": 1720
+    },
+    {
+      "path": "src/query/parser.ts",
+      "upstreamPath": "packages/core/src/query/parser.ts",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/packages/core/src/query/parser.ts",
+      "sha256": "7b0debe54225db14c9922c3195735eaee8ff97b2b03d04cbb984d0e871f50013",
+      "bytes": 6620
+    },
+    {
+      "path": "src/query/session-bars.ts",
+      "upstreamPath": "packages/core/src/query/session-bars.ts",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/packages/core/src/query/session-bars.ts",
+      "sha256": "33a7c0db9e625521df609248b47b09baad5064f24c0019edf63804f1752c3f7b",
+      "gitBlob": "9915b3e53b553c537520a9f19133f9d86ed124f7",
+      "bytes": 11080,
+      "license": "MIT"
+    },
+    {
+      "path": "src/registry/fields.ts",
+      "upstreamPath": "packages/core/src/registry/fields.ts",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/packages/core/src/registry/fields.ts",
+      "sha256": "8eac6800673e73e2d77957424012a9b6cc927e59fa0a116288dbf0be3906502e",
+      "bytes": 14600
+    },
+    {
+      "path": "src/registry/index.ts",
+      "upstreamPath": "packages/core/src/registry/index.ts",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/packages/core/src/registry/index.ts",
+      "sha256": "25bfa809171b54bc2436152b2012ce0c773c65cff55c5d11be8807ab0c550ba9",
+      "bytes": 3234
+    },
+    {
+      "path": "src/registry/outcomes.ts",
+      "upstreamPath": "packages/core/src/registry/outcomes.ts",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/packages/core/src/registry/outcomes.ts",
+      "sha256": "6c2ea641af6a56d4b7c607dd8953b307deba0883e0b17d7f1fb464f6ec775914",
+      "bytes": 14806
+    },
+    {
+      "path": "src/registry/predicates.ts",
+      "upstreamPath": "packages/core/src/registry/predicates.ts",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/packages/core/src/registry/predicates.ts",
+      "sha256": "f9656bef6bf9962502901ed55d9c094fdfa1089bad62693797470e4850f86335",
+      "bytes": 7278
+    },
+    {
+      "path": "src/registry/types.ts",
+      "upstreamPath": "packages/core/src/registry/types.ts",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/packages/core/src/registry/types.ts",
+      "sha256": "3cd3000b0fad7d059cb5857e67c2eec6f3f89e655c03aa8ab950502fc468d0c9",
+      "bytes": 3153
+    },
+    {
+      "path": "src/stats/stats.ts",
+      "upstreamPath": "packages/core/src/stats/stats.ts",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/packages/core/src/stats/stats.ts",
+      "sha256": "d5544b51f48c45dc2aefd1c179649e4acce0352f6ea93b72132ec660ae3695ee",
+      "bytes": 2733
+    },
+    {
+      "path": "src/store/store.ts",
+      "upstreamPath": "packages/core/src/store/store.ts",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/packages/core/src/store/store.ts",
+      "sha256": "9ea701f9dae02e4170ef107b411d8e42868951732c192a6c0e2b549aa84362b1",
+      "bytes": 10461
+    },
+    {
+      "path": "src/util/sql.ts",
+      "upstreamPath": "packages/core/src/util/sql.ts",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/packages/core/src/util/sql.ts",
+      "sha256": "fcb42d3ae870bbed34dfdb13c5fac0dabb992d7857ba7470951246ad5b42577d",
+      "bytes": 1083
+    },
+    {
+      "path": "src/util/values.ts",
+      "upstreamPath": "packages/core/src/util/values.ts",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/packages/core/src/util/values.ts",
+      "sha256": "599547b7433cc97660005caa4b2f2db22b2a6fbc7236601458859180b5ca675d",
+      "bytes": 1339
+    },
+    {
+      "path": "src/version.ts",
+      "upstreamPath": "packages/core/src/version.ts",
+      "url": "https://raw.githubusercontent.com/LuxAlgo/edge-stats/a48259887962d0f67a27d2b0815e2df9a52efca5/packages/core/src/version.ts",
+      "sha256": "e54327099bebef05b9474c76828a46cb996cb86b5e8db4df41ee5c91592334e5",
+      "bytes": 39
+    }
+  ],
+  "localFiles": [
+    "index.ts",
+    "package.json",
+    "README.md",
+    "packaging.mjs",
+    "provenance.json",
+    "native-runtime.json",
+    ".gitattributes",
+    "preset-catalog.mjs",
+    "preset-catalog.d.mts",
+    "query-tools.mjs",
+    "query-tools.d.mts",
+    "calendar-data.mjs",
+    "calendar-data.d.mts"
+  ],
+  "excluded": [
+    "adapters",
+    "sync",
+    "trades",
+    "live/board",
+    "live/sinks"
+  ],
+  "dataLicense": "CC-BY-4.0",
+  "dataAttribution": "Calendar data from Edge Stats by LuxAlgo (github.com/LuxAlgo/edge-stats)"
+}

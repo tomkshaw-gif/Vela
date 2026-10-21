@@ -14,6 +14,8 @@ import { ReplayPresentation, replayIntervalCount, replayIntervalLabel, replayPre
 import './replay-presentation.css';
 import { buildReplayShell, controlIcon } from './shell';
 import { mountSessionDashboard } from './session-dashboard';
+import { mountMarketStatsPage } from './market-stats-page';
+import { mountHistoryControls } from './history-controls';
 import { replayKeyStatsMarkup } from './replay-stats-dock';
 import { mountReplayEquityChart, type ReplayEquityChart } from './replay-equity-chart';
 import { TradeTicket } from './trade-ticket';
@@ -37,11 +39,16 @@ const numeric = (id: string): number => {
 const optionalNumber = (id: string): number | undefined => value(id).trim() ? numeric(id) : undefined;
 const pnlClass = (amount: number): string => amount < 0 ? 'negative' : amount > 0 ? 'positive' : '';
 type CommandOutcome = 'accepted' | 'conflict' | 'stale';
-type StudioMode = 'sessions' | 'chart' | 'backtest';
+type StudioMode = 'sessions' | 'chart' | 'backtest' | 'stats';
 
 
 class ReplayStudio {
     private mode: StudioMode = 'sessions';
+    private get chartMode(): boolean { return this.mode === 'chart' || this.mode === 'backtest'; }
+    private statsPage: ReturnType<typeof mountMarketStatsPage> | null = null;
+    private statsTasks = new Set<Promise<void>>();
+    private historyControls: ReturnType<typeof mountHistoryControls> | null = null;
+    private historyTasks = new Set<Promise<void>>();
     private navigationGeneration = 0;
     private navigationQueue = Promise.resolve();
     private navigating = false;
@@ -58,7 +65,7 @@ class ReplayStudio {
     private commandQueue = Promise.resolve();
     private playback = new ReplayPlayback({ advance: async () => { await this.command({ type: 'advance', count: replayIntervalCount(value('replay-interval')) }); },
         delay: () => Math.max(40, 1000 / Number(value('speed'))),
-        canPlay: () => this.chartReady && this.mode !== 'sessions' && !this.navigating && !this.runtimeBlocked && !this.disposed && !this.jumping && this.view?.session.status === 'paused',
+        canPlay: () => this.chartReady && this.chartMode && !this.navigating && !this.runtimeBlocked && !this.disposed && !this.jumping && this.view?.session.status === 'paused',
         onError: (error) => this.error(error) });
     private get playing(): boolean { return this.playback.playing; }
     private replayPresentation = new ReplayPresentation(() => this.pause(), replayPreferenceStore());
@@ -67,11 +74,14 @@ class ReplayStudio {
     private tradeTicket: TradeTicket;
     private replayEquityChart: ReplayEquityChart | null = null;
     private activeTab = 'analytics';
+    private tradesPage = 0;
+    private rejectionsPage = 0;
+    private sessionActionBusy = false;
     private analytics: Analytics | null = null;
     private analyticsVersion = 0;
     private analyticsRefresh = new ReplayAnalyticsRefresh({
-        target: () => this.mode !== 'sessions' && this.view && !this.mutationBusy && !this.runtimeBlocked && !this.disposed ? { sessionId: this.view.session.id, version: this.analyticsVersion } : null,
-        enabled: () => this.mode !== 'sessions' && this.activeTab === 'analytics' && !this.disposed && !this.runtimeBlocked && !this.mutationBusy,
+        target: () => this.chartMode && this.view && !this.mutationBusy && !this.runtimeBlocked && !this.disposed ? { sessionId: this.view.session.id, version: this.analyticsVersion } : null,
+        enabled: () => this.chartMode && this.activeTab === 'analytics' && !this.disposed && !this.runtimeBlocked && !this.mutationBusy,
         load: (target, signal) => this.api.get<Analytics>(`/api/sessions/${encodeURIComponent(target.sessionId)}/analytics`, signal),
         apply: (analysis) => { this.analytics = analysis; if (this.activeTab === 'analytics') this.renderAnalytics(); },
         onError: (error) => {
@@ -103,12 +113,13 @@ class ReplayStudio {
             newSession: () => { void this.run(() => this.action('new-session', {})); },
             openSession: id => { void this.run(() => this.action('open-session', { id })); },
             openChart: () => { void this.run(() => this.action('chart', {})); },
+            openStats: () => { void this.run(() => this.action('stats', {})); },
             openData: () => { void this.run(() => this.action('data', {})); },
             importSession: () => { void this.run(() => this.action('import-session', {})); },
         });
         this.dashboard.update({ sessions: [], datasets: [], loading: true });
         this.tradeTicket = new TradeTicket($<HTMLFormElement>('#ticket-form'), { submit: (side) => this.run(() => this.place(side)),
-            isBlocked: () => !this.chartReady || this.mode === 'sessions' || this.navigating || this.runtimeBlocked || this.starting || this.disposed || this.mutationBusy || this.jumping });
+            isBlocked: () => !this.chartReady || !this.chartMode || this.navigating || this.runtimeBlocked || this.starting || this.disposed || this.mutationBusy || this.jumping });
         this.disposers.push(() => this.tradeTicket.destroy());
         const transport = $('.transport');
         const replayLabel = document.createElement('span');
@@ -118,11 +129,11 @@ class ReplayStudio {
         const resultsSlot = document.createComment('Session results home'); sessionResults.before(resultsSlot);
         const chrome = (event: Event): void => {
             const detail = (event as CustomEvent<{ kind: string; target?: HTMLElement; command?: Command; sessionId?: string; revision?: number; price?: number | null; orderType?: 'limit' | 'stop'; side?: 'buy' | 'sell'; quantity?: number; bracket?: 'takeProfit' | 'stopLoss'; takeProfits?: TakeProfitLeg[]; complete?: () => void }>).detail;
-            if ((!this.chartReady || this.mode === 'sessions' || this.navigating) && ['replay-toggle', 'date-jump', 'go-to', 'ticket-price-select', 'ticket-bracket-select', 'ticket-targets-select', 'ticket-clear-preview', 'ticket-quantity-select', 'quick-market-order', 'order-command'].includes(detail.kind)) {
+            if ((!this.chartReady || !this.chartMode || this.navigating) && ['replay-toggle', 'date-jump', 'go-to', 'ticket-price-select', 'ticket-bracket-select', 'ticket-targets-select', 'ticket-clear-preview', 'ticket-quantity-select', 'quick-market-order', 'order-command'].includes(detail.kind)) {
                 detail.complete?.(); return;
             }
             if (detail.kind === 'sessions') this.run(() => this.action('sessions', {}));
-            if (detail.kind === 'chart' || detail.kind === 'backtest') this.run(() => this.action(detail.kind, {}));
+            if (detail.kind === 'chart' || detail.kind === 'backtest' || detail.kind === 'stats') this.run(() => this.action(detail.kind, {}));
             if (detail.kind === 'pause') this.pause();
             if (detail.kind === 'replay-toggle') this.replayPresentation.toggle();
             if (detail.kind === 'replay-close') this.replayPresentation.setOpen(false);
@@ -195,8 +206,8 @@ class ReplayStudio {
             async (layout) => { await this.command({ type: 'layout', layout }, true); },
             (error) => this.error(error), (timeframe) => { $<HTMLSelectElement>('#timeframe').value = timeframe; },
             (price, time) => { $('#last-price').textContent = price === null ? '—' : number(price); $('#cursor-time').textContent = time === null ? 'Before first source bar' : utc(time); this.tradeTicket.update(this.view, price); },
-            () => !this.chartReady || this.starting || this.disposed || this.runtimeBlocked || this.mutationBusy || this.playing || this.jumping || this.mode === 'sessions' || this.navigating,
-            () => !this.chartReady || this.starting || this.disposed || this.runtimeBlocked || this.mutationBusy || this.jumping || this.mode === 'sessions' || this.navigating);
+            () => !this.chartReady || this.starting || this.disposed || this.runtimeBlocked || this.mutationBusy || this.playing || this.jumping || !this.chartMode || this.navigating,
+            () => !this.chartReady || this.starting || this.disposed || this.runtimeBlocked || this.mutationBusy || this.jumping || !this.chartMode || this.navigating);
         this.runtimeMessage = document.createElement('div');
         this.runtimeMessage.id = 'runtime-message'; this.runtimeMessage.hidden = true;
         this.runtimeMessage.setAttribute('role', 'status'); this.runtimeMessage.setAttribute('aria-live', 'polite');
@@ -208,18 +219,26 @@ class ReplayStudio {
             const button = (event.target as Element).closest<HTMLElement>('[data-action]');
             const navigation = $<HTMLDetailsElement>('#replay-navigation');
             if (button || !navigation.contains(event.target as Node)) navigation.open = false;
+            const sessionMenu = $<HTMLDetailsElement>('#session-actions');
+            if (button || !sessionMenu.contains(event.target as Node)) sessionMenu.open = false;
+            if (button?.closest('#session-actions')) sessionMenu.querySelector('summary')?.focus();
             if (!button || button instanceof HTMLButtonElement && button.disabled) return;
             this.run(() => this.action(button.dataset.action!, button.dataset));
         };
         const keydown = (event: KeyboardEvent): void => {
             if (this.runtimeBlocked) { event.preventDefault(); event.stopImmediatePropagation(); return; }
-            if (this.mode === 'sessions' || this.navigating) return;
+            if (!this.chartMode || this.navigating) return;
+            const sessionMenu = $<HTMLDetailsElement>('#session-actions');
+            if (event.key === 'Escape' && sessionMenu.open) {
+                event.preventDefault(); sessionMenu.open = false; sessionMenu.querySelector('summary')?.focus(); return;
+            }
             if (event.key === 'Escape' && $<HTMLDetailsElement>('#replay-navigation').open) {
                 $<HTMLDetailsElement>('#replay-navigation').open = false; return;
             }
             const target = event.target as Element | null;
             if (event.code === 'Space' && target?.closest('button')) return;
             const editing = replayShortcutTargetIsEditing(target)
+                || !!target?.closest('#session-actions')
                 || !!document.querySelector('dialog[open],[role="dialog"][data-state="open"],.vela-dialog-overlay');
             const action = keyboardAction(event, editing);
             if (!action || !this.view || event.repeat) return;
@@ -251,7 +270,10 @@ class ReplayStudio {
         const modal = $<HTMLDialogElement>('#modal');
         const close = (): void => {
             this.modalGeneration++; this.invalidateQuote();
-            if (!modal.open) { this.dateTimePickers?.destroy(); this.dateTimePickers = null; }
+            if (!modal.open) {
+                this.dateTimePickers?.destroy(); this.dateTimePickers = null;
+                this.retireHistoryControls();
+            }
             const key = document.querySelector<HTMLInputElement>('#provider-key'); if (key) key.value = '';
         };
         document.addEventListener('click', click);
@@ -299,12 +321,13 @@ class ReplayStudio {
 
     private routeMode(): StudioMode {
         const route = location.hash.split(/[?\/]/)[0];
-        return route === '#chart' ? 'chart' : route === '#backtest' ? 'backtest' : 'sessions';
+        return route === '#chart' ? 'chart' : route === '#backtest' ? 'backtest' : route === '#stats' ? 'stats' : 'sessions';
     }
 
     private presentMode(): void {
         $('#session-manager').hidden = this.mode !== 'sessions';
-        $('#standard-workspace').hidden = this.mode === 'sessions';
+        $('#standard-workspace').hidden = !this.chartMode;
+        $('#market-stats-page').hidden = this.mode !== 'stats';
         $('#workspace-mode-note').textContent = this.mode === 'chart'
             ? 'Chart · cached saved session context' : 'Backtesting · simulated replay';
         this.updateControls();
@@ -313,11 +336,12 @@ class ReplayStudio {
     private navigate(mode: StudioMode, id?: string, saveLayout = true): Promise<void> {
         const generation = ++this.navigationGeneration;
         const previousMode = this.mode;
+        this.statsPage?.cancel();
         this.pause(); this.navigating = true; this.updateControls();
         const current = (): boolean => generation === this.navigationGeneration && !this.disposed && !this.runtimeBlocked;
         const work = this.navigationQueue.catch(() => undefined).then(async () => {
             if (!current()) return;
-            if (mode === 'sessions') {
+            if (mode === 'sessions' || mode === 'stats') {
                 if (this.chartMounted) {
                     await this.charts.prepareForUpdate(); await this.commandQueue;
                     if (!current()) return;
@@ -326,6 +350,10 @@ class ReplayStudio {
                     this.analyticsRefresh.reset();
                     this.replayEquityChart?.destroy(); this.replayEquityChart = null;
                 }
+                if (mode === 'stats' && !this.statsPage) this.statsPage = mountMarketStatsPage($('#market-stats-page'), this.api, {
+                    onHome: () => { void this.run(() => this.action('sessions', {})); },
+                    onData: () => { void this.run(() => this.action('data', {})); },
+                });
                 this.mode = mode; this.presentMode(); this.renderSessions();
             } else {
                 const sessions = this.bootstrap?.sessions ?? [];
@@ -335,11 +363,14 @@ class ReplayStudio {
                 this.mode = mode; this.presentMode();
             }
             if (!current()) return;
+            if (mode !== 'stats') this.retireStatsPage();
             const modal = $<HTMLDialogElement>('#modal'); if (modal.open) modal.close();
             history.replaceState(null, '', `${location.pathname}${location.search}#${mode}`);
         }).catch((error: unknown) => {
             if (!current()) return;
-            this.mode = previousMode; this.presentMode();
+            const mountedDestination = this.chartMounted && this.chartMode && this.mode === mode;
+            this.mode = mountedDestination ? mode : previousMode; this.presentMode();
+            if (mountedDestination) history.replaceState(null, '', `${location.pathname}${location.search}#${this.mode}`);
             this.dashboardError = error instanceof Error ? error.message : 'Could not open the session.';
             this.renderSessions();
             throw error;
@@ -366,6 +397,7 @@ class ReplayStudio {
         this.runtimeBlocked = notice.blocked;
         if (notice.blocked) {
             this.pause();
+            this.statsPage?.cancel(); this.historyControls?.cancel();
             const key = document.querySelector<HTMLInputElement>('#provider-key'); if (key) key.value = '';
             const modal = $<HTMLDialogElement>('#modal'); if (modal.open) modal.close();
         }
@@ -383,6 +415,7 @@ class ReplayStudio {
 
     private async prepareUpdate(): Promise<void> {
         this.pause();
+        await Promise.all([...this.statsTasks, ...this.historyTasks, this.statsPage?.prepare(), this.historyControls?.prepare()]);
         // Already-started dialogs/provider requests must settle before the snapshot.
         await Promise.allSettled([...this.activeTasks]);
         await this.commandQueue;
@@ -463,6 +496,7 @@ class ReplayStudio {
         this.commandQueue = Promise.resolve(); this.mutationBusy = false;
         $('#save-status').textContent = 'Opening session…';
         this.updateControls();
+        this.tradesPage = 0; this.rejectionsPage = 0;
         this.view = view; this.renderView();
         rememberSession(sessionStorage, view.session.id);
         $('#chart-empty').hidden = true;
@@ -539,7 +573,7 @@ class ReplayStudio {
             const recovery = this.navigate(this.mode === 'chart' ? 'chart' : 'backtest', id, false);
             const recoveryNavigation = this.navigationGeneration;
             await recovery;
-            if (recoveryNavigation === this.navigationGeneration && this.view?.session.id === id && this.mode !== 'sessions') {
+            if (recoveryNavigation === this.navigationGeneration && this.view?.session.id === id && this.mode !== 'sessions' && this.mode !== 'stats') {
                 this.toast('This session changed in another window. Refreshed; please retry your action.', true);
             }
             return outcome;
@@ -588,8 +622,11 @@ class ReplayStudio {
 
     private updateControls(): void {
         const active = !!this.view;
-        const tradable = this.chartReady && this.mode !== 'sessions' && !this.navigating && this.view?.session.status === 'paused';
-        $('#session-actions').hidden = !active;
+        const tradable = this.chartReady && this.chartMode && !this.navigating && this.view?.session.status === 'paused';
+        $('#session-actions').hidden = !active || !this.chartMode;
+        for (const button of document.querySelectorAll<HTMLButtonElement>('#session-actions button')) {
+            button.disabled = !this.chartReady || this.navigating || this.mutationBusy || this.jumping || this.runtimeBlocked || this.disposed || this.sessionActionBusy;
+        }
         for (const element of document.querySelectorAll<HTMLButtonElement>('[data-action="buy"],[data-action="sell"],[data-action="step"],[data-action="skip"],[data-action="go-to"],[data-action="replay-jump-preset"],[data-action="play"],[data-action="fast-forward"],[data-action="amend-order"],[data-action="cancel-order"]')) element.disabled = !tradable || this.mutationBusy || this.jumping;
         for (const element of document.querySelectorAll<HTMLButtonElement>('[data-action="close"],[data-action="reverse"],[data-action="partial-close"],[data-action="amend-position"]')) element.disabled = !tradable || this.mutationBusy || this.jumping || !this.view?.session.position;
         for (const element of document.querySelectorAll<HTMLSelectElement>('#timeframe,#chart-layout')) element.disabled = !active;
@@ -615,6 +652,17 @@ class ReplayStudio {
         const working = this.view?.session.orders.filter((order) => order.status === 'working') ?? [];
         $('#working-count').textContent = String(working.length);
         $('#orders-content').innerHTML = working.length ? working.map((order) => `<div class="working-order"><div><strong class="${order.side === 'buy' ? 'positive' : 'negative'}">${order.side.toUpperCase()} ${order.qty}</strong> <span>${esc(order.type)}</span><small>${order.price ? number(order.price) : 'Next source bar'} · simulated</small>${order.takeProfits?.length ? `<small>${order.takeProfits.map((leg, i) => `TP${i + 1} ${number(leg.price)} &times; ${leg.qty}`).join(' &middot; ')}; ${order.qty - order.takeProfits.reduce((sum, leg) => sum + leg.qty, 0)} runner</small>` : ''}</div><div><button class="quiet icon-button" data-action="amend-order" data-id="${esc(order.id)}" aria-label="Amend simulated order">✎</button><button class="quiet icon-button" data-action="cancel-order" data-id="${esc(order.id)}" aria-label="Cancel simulated order">×</button></div></div>`).join('') : '<div class="empty-position">No working simulated orders</div>';
+        const host = $('#rejected-orders');
+        const focused = host.contains(document.activeElement) ? (document.activeElement as HTMLElement).dataset.action : undefined;
+        const rejected = this.view?.session.orders.filter(order => order.status === 'rejected') ?? [];
+        $('#rejected-count').hidden = !rejected.length;
+        $('#rejected-count').textContent = rejected.length ? `${rejected.length} rejected` : '';
+        this.rejectionsPage = Math.max(0, Math.min(this.rejectionsPage, Math.ceil(rejected.length / 25) - 1));
+        const start = this.rejectionsPage * 25;
+        const page = rejected.slice(Math.max(0, rejected.length - start - 25), rejected.length - start).reverse();
+        host.hidden = !rejected.length;
+        host.innerHTML = rejected.length ? `<h2>Rejected orders</h2><p class="field-note">These orders did not execute. Reasons remain saved with this session.</p><p class="review-coverage" tabindex="-1" role="status">${start + 1}–${start + page.length} of ${rejected.length} rejected orders · newest first</p>${page.map(order => `<div class="rejected-order"><strong>${order.side.toUpperCase()} ${order.qty} · ${esc(order.type)} · Rejected</strong><time>Submitted ${utc(order.createdTime)}</time><p>${esc(order.rejectReason ?? 'No rejection reason was recorded.')}</p></div>`).join('')}<div class="review-pagination"><button type="button" class="quiet" data-action="rejections-newer" ${start === 0 ? 'disabled' : ''}>Newer</button><button type="button" class="quiet" data-action="rejections-older" ${start + page.length >= rejected.length ? 'disabled' : ''}>Older</button></div>` : '';
+        if (focused) (host.querySelector<HTMLButtonElement>(`[data-action="${focused}"]:not(:disabled)`) ?? host.querySelector<HTMLElement>('.review-coverage'))?.focus();
     }
 
     private renderRules(): void {
@@ -644,8 +692,13 @@ class ReplayStudio {
         if (this.activeTab === 'trading') {
             results.replaceChildren();
         } else if (this.activeTab === 'trades') {
-            results.innerHTML = session.trades.length ? `<p class="field-note">Each row is a closed exit slice. Partial exits can produce several rows for one position.</p><table class="trade-table"><thead><tr><th>Direction</th><th>Qty</th><th>Entry → exit</th><th>Exit time · UTC</th><th>Fees</th><th>Net P&L</th><th>Exit reason</th></tr></thead><tbody>${session.trades.slice(-500).reverse().map((trade) => `<tr><td><span class="direction-pill ${trade.side === 'buy' ? 'long' : 'short'}">${trade.side === 'buy' ? 'LONG' : 'SHORT'}</span></td><td>${trade.qty}</td><td>${number(trade.entryPrice)} <span class="muted">→</span> ${number(trade.exitPrice)}</td><td class="muted">${utc(trade.exitTime).replace(' UTC', '')}</td><td>${money(trade.fees)}</td><td class="${pnlClass(trade.netPnl)}">${signedMoney(trade.netPnl)}</td><td class="muted">${esc(trade.reason)}</td></tr>`).join('')}</tbody></table>`
+            const focused = results.contains(document.activeElement) ? (document.activeElement as HTMLElement).dataset.action : undefined;
+            this.tradesPage = Math.max(0, Math.min(this.tradesPage, Math.ceil(session.trades.length / 50) - 1));
+            const start = this.tradesPage * 50;
+            const page = session.trades.slice(Math.max(0, session.trades.length - start - 50), session.trades.length - start).reverse();
+            results.innerHTML = session.trades.length ? `<p class="field-note">Each row is a closed exit slice. Partial exits can produce several rows for one position.</p><div class="review-pagination"><p class="review-coverage" tabindex="-1" role="status">${start + 1}–${start + page.length} of ${session.trades.length} closed exit slices · newest first</p><button type="button" class="quiet" data-action="trades-csv">Export all ${session.trades.length} exit slices · CSV</button><button type="button" class="quiet" data-action="trades-newer" ${start === 0 ? 'disabled' : ''}>Newer</button><button type="button" class="quiet" data-action="trades-older" ${start + page.length >= session.trades.length ? 'disabled' : ''}>Older</button></div><table class="trade-table"><thead><tr><th>Direction</th><th>Qty</th><th>Entry → exit</th><th>Exit time · UTC</th><th>Fees</th><th>Net P&L</th><th>Exit reason</th></tr></thead><tbody>${page.map((trade) => `<tr><td><span class="direction-pill ${trade.side === 'buy' ? 'long' : 'short'}">${trade.side === 'buy' ? 'LONG' : 'SHORT'}</span></td><td>${trade.qty}</td><td>${number(trade.entryPrice)} <span class="muted">→</span> ${number(trade.exitPrice)}</td><td class="muted">${utc(trade.exitTime).replace(' UTC', '')}</td><td>${money(trade.fees)}</td><td class="${pnlClass(trade.netPnl)}">${signedMoney(trade.netPnl)}</td><td class="muted">${esc(trade.reason)}</td></tr>`).join('')}</tbody></table>`
                 : '<div class="empty-small"><span class="empty-icon">⌁</span><strong>Every trade is a lesson.</strong>Your completed simulated trades will appear here.</div>';
+            if (focused) (results.querySelector<HTMLButtonElement>(`[data-action="${focused}"]:not(:disabled)`) ?? results.querySelector<HTMLElement>('.review-coverage'))?.focus();
         } else if (this.activeTab === 'bookmarks') {
             results.innerHTML = `<div class="bookmarks-heading"><p class="muted">Bookmark a decision point. Replay moves forward only; use a fresh attempt to revisit earlier bars.</p><button class="quiet" data-action="bookmark">＋ Add bookmark</button></div>${session.bookmarks.length ? session.bookmarks.map((bookmark) => `<div class="bookmark-row"><span>⚑</span><strong>${esc(bookmark.label)}</strong><time>${utc(bookmark.time)}</time></div>`).join('') : '<div class="empty-small">Save a moment worth revisiting.</div>'}`;
         } else if (this.activeTab === 'rules') {
@@ -689,7 +742,7 @@ class ReplayStudio {
     private loadAnalytics(): Promise<void> { return this.analyticsRefresh.refresh(); }
 
     private play(): void {
-        if (this.mode === 'sessions' || this.navigating || this.runtimeBlocked || this.jumping || !this.view || this.view.session.status !== 'paused' || this.playing) return;
+        if (!this.chartMode || this.navigating || this.runtimeBlocked || this.jumping || !this.view || this.view.session.status !== 'paused' || this.playing) return;
         this.replayPresentation.setOpen(true);
         this.playback.start(); this.updateControls();
     }
@@ -697,10 +750,14 @@ class ReplayStudio {
     private pause(): void { this.playback.stop(); this.jumping = false; this.jumpGeneration++; this.updateControls(); }
 
     private async action(action: string, data: DOMStringMap): Promise<void> {
-        if ((!this.chartReady || this.mode === 'sessions' || this.navigating) && !['sessions', 'chart', 'backtest', 'data', 'reload', 'new-session', 'close-modal', 'open-session', 'import-session', 'demo', 'quote-download'].includes(action)) return;
+        if ((!this.chartReady || !this.chartMode || this.navigating) && !['sessions', 'chart', 'backtest', 'stats', 'data', 'reload', 'new-session', 'close-modal', 'open-session', 'import-session', 'demo', 'quote-download'].includes(action)) return;
+        if (['rename', 'save', 'clone', 'restart', 'export'].includes(action)) {
+            await this.sessionAction(action); return;
+        }
         switch (action) {
             case 'sessions': await this.navigate('sessions'); break;
             case 'chart': await this.navigate('chart'); break;
+            case 'stats': await this.navigate('stats'); break;
             case 'backtest': await this.navigate('backtest'); break;
             case 'data': this.pause(); this.dataDialog(); break;
             case 'reload': location.reload(); break;
@@ -721,8 +778,6 @@ class ReplayStudio {
             case 'amend-position': this.pause(); this.amendDialog(); break;
             case 'amend-order': this.pause(); this.amendDialog(data.id); break;
             case 'cancel-order': this.pause(); if (data.id) await this.command({ type: 'cancel', orderId: data.id }); break;
-            case 'rename': this.simpleDialog('Rename session', 'rename-form', 'Session name', this.view?.session.config.name ?? '', 'Save name'); break;
-            case 'save': { await this.charts.flush(); this.toast('Chart layout, indicators and drawings saved with this session.'); break; }
             case 'bookmark': this.pause(); if (this.view) this.simpleDialog('Bookmark this moment', 'bookmark-form', 'A short label', '', 'Save bookmark'); break;
             case 'go-to': this.replayPresentation.setOpen(true); this.pause(); this.goToDialog(); break;
             case 'replay-jump-preset':
@@ -730,8 +785,11 @@ class ReplayStudio {
                     this.replayPresentation.setOpen(true); this.pause(); this.goToDialog(); await this.jumpToPreset(data.preset);
                 } break;
             case 'jump-preset': if (data.preset === 'london' || data.preset === 'new-york' || data.preset === 'next-day') await this.jumpToPreset(data.preset); break;
-            case 'clone': case 'restart': await this.clone(action === 'restart'); break;
-            case 'export': await this.exportSession(); break;
+            case 'trades-newer': this.tradesPage--; this.renderResults(); break;
+            case 'trades-older': this.tradesPage++; this.renderResults(); break;
+            case 'trades-csv': this.exportTradesCsv(); break;
+            case 'rejections-newer': this.rejectionsPage--; this.renderOrders(); break;
+            case 'rejections-older': this.rejectionsPage++; this.renderOrders(); break;
             case 'import-session': this.importSession(); break;
             case 'demo': await this.createDemo(); break;
             case 'quote-download': await this.downloadQuote(); break;
@@ -739,6 +797,21 @@ class ReplayStudio {
             case 'refresh-analytics': await this.loadAnalytics(); break;
             case 'monte-carlo': await this.calculateMonteCarlo(); break;
         }
+    }
+
+    private async sessionAction(action: string): Promise<void> {
+        if (!this.view || this.mutationBusy || this.jumping || this.runtimeBlocked || this.disposed || this.sessionActionBusy) return;
+        const id = this.view.session.id; const generation = this.sessionGeneration; const navigation = this.navigationGeneration;
+        this.sessionActionBusy = true; this.pause();
+        try {
+            if (action === 'rename') this.simpleDialog('Rename session', 'rename-form', 'Session name', this.view.session.config.name, 'Save name');
+            else if (action === 'clone' || action === 'restart') await this.clone(action === 'restart');
+            else if (action === 'export') await this.exportSession();
+            else if (action === 'save') {
+                await this.charts.flush();
+                if (generation === this.sessionGeneration && navigation === this.navigationGeneration && this.view?.session.id === id && !this.disposed && !this.runtimeBlocked) this.toast('Chart layout, indicators and drawings saved with this session.');
+            }
+        } finally { this.sessionActionBusy = false; if (!this.disposed) this.updateControls(); }
     }
 
     private updateTabs(): void {
@@ -783,14 +856,31 @@ class ReplayStudio {
 
     private async exportSession(): Promise<void> {
         if (!this.view) return;
-        this.pause(); await this.commandQueue;
         const id = this.view.session.id; const generation = this.sessionGeneration;
+        const navigation = this.navigationGeneration;
+        const current = (): boolean => generation === this.sessionGeneration && navigation === this.navigationGeneration
+            && this.view?.session.id === id && !this.disposed && !this.runtimeBlocked;
+        this.pause(); await this.commandQueue;
+        if (!current()) return;
         const layout = this.charts.snapshot();
         if (layout && await this.command({ type: 'layout', layout }) !== 'accepted') return;
-        if (generation !== this.sessionGeneration) return;
+        if (!current()) return;
         const backup: unknown = await this.api.get(`/api/sessions/${encodeURIComponent(id)}/export`, this.sessionController.signal);
-        if (generation !== this.sessionGeneration) return;
+        if (!current()) return;
         downloadJson(`replay-${id}.json`, backup); this.toast('Session backup exported without provider credentials.');
+    }
+
+    private exportTradesCsv(): void {
+        if (!this.view) return;
+        const cell = (value: string | number): string => {
+            const text = typeof value === 'string' && /^[=+\-@\t\r]/.test(value) ? `'${value}` : String(value);
+            return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+        };
+        const rows: (string | number)[][] = [['Exit ID', 'Side', 'Contracts', 'Entry time UTC', 'Exit time UTC', 'Entry price', 'Exit price', 'Gross PnL USD', 'Fees USD', 'Net PnL USD', 'Exit reason']];
+        for (const trade of this.view.session.trades) rows.push([trade.id, trade.side, trade.qty, new Date(trade.entryTime).toISOString(), new Date(trade.exitTime).toISOString(), trade.entryPrice, trade.exitPrice, trade.grossPnl, trade.fees, trade.netPnl, trade.reason]);
+        const url = URL.createObjectURL(new Blob([rows.map(row => row.map(cell).join(',')).join('\r\n') + '\r\n'], { type: 'text/csv;charset=utf-8' }));
+        const anchor = document.createElement('a'); anchor.href = url; anchor.download = `replay-${this.view.session.id}-exits.csv`;
+        const objectUrls = URL; anchor.click(); setTimeout(() => objectUrls.revokeObjectURL(url), 1000);
     }
 
     private importSession(): void {
@@ -817,6 +907,7 @@ class ReplayStudio {
     private showDialog(title: string, body: string, wide = false): void {
         const modal = $<HTMLDialogElement>('#modal');
         this.dateTimePickers?.destroy(); this.dateTimePickers = null;
+        if (this.historyControls) this.retireHistoryControls();
         if (modal.open) modal.close();
         this.modalGeneration++;
         modal.classList.toggle('wide-modal', wide);
@@ -838,7 +929,7 @@ class ReplayStudio {
     private chartExitDialog(event: CustomEvent): void {
         const detail = event.detail;
         const session = this.view?.session;
-        if (!detail || !session || !this.chartReady || this.mode === 'sessions' || this.navigating || this.runtimeBlocked || this.starting
+        if (!detail || !session || !this.chartReady || this.mode === 'sessions' || this.mode === 'stats' || this.navigating || this.runtimeBlocked || this.starting
             || this.disposed || this.mutationBusy || this.playing || this.jumping || session.status !== 'paused'
             || session.id !== detail.sessionId || session.revision !== detail.revision || session.cursor !== detail.cursor) return;
         if (detail.orderId && event.type === 'local-replay:chart-edit-exits') {
@@ -1019,6 +1110,7 @@ class ReplayStudio {
         const error = form.closest('#modal')?.querySelector<HTMLElement>('#dialog-error');
         if (reset && error) { error.hidden = true; error.textContent = ''; }
         form.querySelector('#new-data-range')!.textContent = `Cached: ${wallTimeInput(dataset.start, zone).replace('T', ' ')} to ${wallTimeInput(dataset.end, zone).replace('T', ' ')} ${zone} (end excluded). Replay starts at the first available candle at or after your chosen time.`;
+        form.querySelector('#new-dataset-coverage')!.textContent = `${dataset.name} · ${dataset.symbol}: available from ${wallTimeInput(dataset.start, zone).replace('T', ' ')} to ${wallTimeInput(dataset.end, zone).replace('T', ' ')} ${zone} (end excluded). Choose a different cached dataset for dates outside this range.`;
     }
 
     private updateGoToZone(): void {
@@ -1077,7 +1169,7 @@ class ReplayStudio {
         if (!datasets.length) {
             this.showDialog('Choose your starting point', `<div class="modal-form"><p class="modal-lead">Every good session starts with the right data.</p><p class="muted">Import a contract's OHLCV file, request a data cost estimate, or explore with deterministic synthetic demo data.</p><button class="primary" data-action="demo">Create synthetic demo data</button><button class="quiet" data-action="data">Open data & settings ↗</button></div>`); return;
         }
-        this.showDialog('Create a session', `<form id="new-session-form" class="modal-form"><div class="two-fields"><label>Session name<input id="new-name" value="${esc(`Morning practice ${new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`)}" maxlength="120" required /></label><label>Balance preset<select id="preset"><option value="50">Generic 50K</option><option value="100">Generic 100K</option><option value="custom">Custom</option></select></label></div><label>Contract / cached dataset<select id="new-dataset">${datasets.map((dataset) => `<option value="${esc(dataset.id)}">${esc(dataset.name)} · ${esc(dataset.symbol)} · ${dataset.schema} · ${dataset.source === 'demo' ? 'SYNTHETIC' : dataset.source}</option>`).join('')}</select></label><div class="two-fields"><div class="date-time-field"><span>Replay start: date & time</span><input id="new-start-time" data-date-time-picker aria-label="Replay start date and time" type="datetime-local" step="1" required /></div><label>Time zone<select id="new-zone">${this.zoneOptions()}</select></label></div>${this.timeOffsetMarkup('new-start-time')}<div class="date-time-field"><span>Session end: date & time (excluded)</span><input id="new-end-time" data-date-time-picker aria-label="Session end date and time, excluded" type="datetime-local" step="1" required /></div>${this.timeOffsetMarkup('new-end-time')}<div class="date-time-range"><p id="new-data-range" class="field-note"></p><button type="button" class="quiet date-time-reset" data-date-range-reset>Use full cached range</button></div><div class="two-fields"><label>Session mode<select id="new-mode"><option value="practice">Free practice</option><option value="prop">Prop evaluation</option></select></label><label>Initial balance · USD<input id="new-balance" type="number" min="1" step="1" value="50000" required /></label></div><details id="evaluation-rules" hidden><summary>Evaluation rules <span>Generic editable example</span></summary><div class="three-fields"><label>Profit target · USD<input id="rule-target" type="number" min="0" value="3000" required /></label><label>Daily loss · USD<input id="rule-daily" type="number" min="0" value="1000" required /></label><label>Max drawdown · USD<input id="rule-drawdown" type="number" min="0" value="2000" required /></label></div><div class="two-fields"><label>Drawdown model<select id="rule-type"><option value="trailing-eod">Trailing · end of day</option><option value="trailing-intraday">Trailing · intraday</option><option value="static">Static</option></select></label><label>Consistency limit · %<input id="rule-consistency" type="number" min="1" max="100" placeholder="Off" /></label></div><div class="three-fields"><label>Minimum trading days<input id="rule-days" type="number" min="0" max="365" value="5" required /></label><label>Max contracts<input id="rule-contracts" type="number" min="1" max="1000" value="5" required /></label><label>Reset hour · 0–23<input id="rule-hour" type="number" min="0" max="23" value="17" required /></label></div><label>Trading day timezone<input id="rule-zone" value="America/Chicago" required /></label><div class="check-row"><label><input id="rule-lock" type="checkbox" checked /> Lock drawdown at initial balance</label><label><input id="rule-flat" type="checkbox" checked /> Require flat to pass</label></div></details><details><summary>Advanced: fill costs</summary><div class="three-fields"><label>Commission / side · USD<input id="new-fee" type="number" min="0" step="0.01" value="2.50" required /></label><label>Slippage · ticks<input id="new-slippage" type="number" min="0" step="0.5" value="1" required /></label><label>Spread · ticks<input id="new-spread" type="number" min="0" step="0.5" value="0" required /></label></div></details><div class="modal-actions"><button type="button" class="quiet" data-action="close-modal">Cancel</button><button class="primary">Open practice workspace ↗</button></div></form>`, true);
+        this.showDialog('Create a session', `<form id="new-session-form" class="modal-form"><div class="two-fields"><label>Session name<input id="new-name" value="${esc(`Morning practice ${new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`)}" maxlength="120" required /></label><label>Balance preset<select id="preset"><option value="50">Generic 50K</option><option value="100">Generic 100K</option><option value="custom">Custom</option></select></label></div><label>Contract / cached dataset<select id="new-dataset" aria-describedby="new-dataset-coverage new-data-help">${datasets.map((dataset) => `<option value="${esc(dataset.id)}">${esc(dataset.name)} · ${esc(dataset.symbol)} · ${dataset.schema} · ${dataset.source === 'demo' ? 'SYNTHETIC' : dataset.source}</option>`).join('')}</select></label><p id="new-dataset-coverage" class="field-note" role="status"></p><p id="new-data-help" class="field-note">Need other dates? This calendar is limited to the selected cached dataset. Finish or cancel this form, then open Data &amp; settings on the Backtesting dashboard to import another dataset or explicitly request other historical data. Nothing is downloaded automatically.</p><div class="two-fields"><div class="date-time-field"><span>Replay start: date & time</span><input id="new-start-time" data-date-time-picker aria-label="Replay start date and time" type="datetime-local" step="1" required /></div><label>Time zone<select id="new-zone">${this.zoneOptions()}</select></label></div>${this.timeOffsetMarkup('new-start-time')}<div class="date-time-field"><span>Session end: date & time (excluded)</span><input id="new-end-time" data-date-time-picker aria-label="Session end date and time, excluded" type="datetime-local" step="1" required /></div>${this.timeOffsetMarkup('new-end-time')}<div class="date-time-range"><p id="new-data-range" class="field-note"></p><button type="button" class="quiet date-time-reset" data-date-range-reset>Use full cached range</button></div><div class="two-fields"><label>Session mode<select id="new-mode"><option value="practice">Free practice</option><option value="prop">Prop evaluation</option></select></label><label>Initial balance · USD<input id="new-balance" type="number" min="1" step="1" value="50000" required /></label></div><details id="evaluation-rules" hidden><summary>Evaluation rules <span>Generic editable example</span></summary><div class="three-fields"><label>Profit target · USD<input id="rule-target" type="number" min="0" value="3000" required /></label><label>Daily loss · USD<input id="rule-daily" type="number" min="0" value="1000" required /></label><label>Max drawdown · USD<input id="rule-drawdown" type="number" min="0" value="2000" required /></label></div><div class="two-fields"><label>Drawdown model<select id="rule-type"><option value="trailing-eod">Trailing · end of day</option><option value="trailing-intraday">Trailing · intraday</option><option value="static">Static</option></select></label><label>Consistency limit · %<input id="rule-consistency" type="number" min="1" max="100" placeholder="Off" /></label></div><div class="three-fields"><label>Minimum trading days<input id="rule-days" type="number" min="0" max="365" value="5" required /></label><label>Max contracts<input id="rule-contracts" type="number" min="1" max="1000" value="5" required /></label><label>Reset hour · 0–23<input id="rule-hour" type="number" min="0" max="23" value="17" required /></label></div><label>Trading day timezone<input id="rule-zone" value="America/Chicago" required /></label><div class="check-row"><label><input id="rule-lock" type="checkbox" checked /> Lock drawdown at initial balance</label><label><input id="rule-flat" type="checkbox" checked /> Require flat to pass</label></div></details><details><summary>Advanced: fill costs</summary><div class="three-fields"><label>Commission / side · USD<input id="new-fee" type="number" min="0" step="0.01" value="2.50" required /></label><label>Slippage · ticks<input id="new-slippage" type="number" min="0" step="0.5" value="1" required /></label><label>Spread · ticks<input id="new-spread" type="number" min="0" step="0.5" value="0" required /></label></div></details><div class="modal-actions"><button type="button" class="quiet" data-action="close-modal">Cancel</button><button class="primary">Open practice workspace ↗</button></div></form>`, true);
         const preferred = this.view?.dataset.id ?? datasets.find(dataset => dataset.source === 'databento')?.id ?? datasets[0]!.id;
         $<HTMLSelectElement>('#new-dataset').value = preferred;
         $<HTMLFormElement>('#new-session-form').dataset.mode = mode;
@@ -1098,7 +1190,27 @@ class ReplayStudio {
     }
 
     private dataDialog(): void {
-        this.showDialog('Data & settings', `<div class="data-settings"><div class="provider-heading"><span class="provider-logo">D</span><div><h3>Databento</h3><p>Exact futures contracts · official historical API</p></div><span id="provider-status" class="configured-badge ${this.bootstrap?.provider.configured ? 'configured' : ''}">${this.bootstrap?.provider.configured ? 'KEY CONFIGURED' : 'NO KEY'}</span></div><form id="provider-key-form"><label>API key<div class="key-row"><input id="provider-key" type="password" autocomplete="off" spellcheck="false" placeholder="Enter key to store securely on this computer" required /><button class="quiet" type="submit">Save key</button></div></label><p class="field-note">Protected for your Windows user. Never included in session exports.</p></form><hr /><form id="provider-quote-form"><div class="subheading"><h3>Request a cost preview</h3><span class="zero-budget">$0 ESTIMATE REQUIRED</span></div><p class="muted">Only an estimated $0 quote enables a separate download. The server re-quotes the exact scope first. The provider has no atomic billing cap: a $0 estimate cannot guarantee a zero invoice. No automatic downloads, continuous contracts or rolls.</p><div class="two-fields"><label>Raw contract symbol<input id="provider-symbol" value="NQZ6" placeholder="e.g. NQZ6" pattern="(?:MNQ|MES|NQ|ES)[FGHJKMNQUVXZ][0-9]{1,2}" required /></label><label>Native OHLCV schema<select id="provider-schema"><option value="ohlcv-1m">ohlcv-1m · one-minute bars</option><option value="ohlcv-1s">ohlcv-1s · one-second bars</option></select></label></div><div class="two-fields"><label>Start · UTC<input id="provider-start" type="datetime-local" value="2026-10-01T13:30" required /></label><label>End · UTC<input id="provider-end" type="datetime-local" value="2026-10-01T20:00" required /></label></div><div class="preview-actions"><span>GLBX.MDP3 · raw symbol</span><button class="quiet" type="submit">Preview cost estimate</button></div></form><div id="quote-result"></div><hr /><div class="subheading"><h3>Import your own data</h3><span class="muted">CSV / JSONL</span></div><form id="dataset-import-form"><div class="two-fields"><label>Dataset name<input id="import-name" placeholder="My replay data" maxlength="120" /></label><label>Raw contract symbol<input id="import-symbol" value="NQZ6" pattern="(?:MNQ|MES|NQ|ES)[FGHJKMNQUVXZ][0-9]{1,2}" required /></label></div><div class="two-fields"><label>Schema<select id="import-schema"><option value="ohlcv-1m">ohlcv-1m</option><option value="ohlcv-1s">ohlcv-1s</option></select></label><label>File format<select id="import-format"><option value="csv">CSV</option><option value="jsonl">JSONL</option></select></label></div><label>Choose a file<input id="dataset-file" type="file" accept=".csv,.jsonl,.ndjson,.json,.txt" /></label><label>Or paste OHLCV data<textarea id="import-text" rows="3" placeholder="time,open,high,low,close,volume&#10;2026-10-01T13:30:00Z,25000,25001,24999,25000.5,100"></textarea></label><p class="field-note">UTC timestamps or epoch milliseconds. Required: time, open, high, low, close and volume.</p><div class="preview-actions"><button class="text-button" type="button" data-action="demo">Use seeded synthetic demo ↗</button><button class="primary">Import & cache data</button></div></form><div class="cached-data"><div class="subheading"><h3>Cached datasets</h3><span class="muted">${this.bootstrap?.datasets.length ?? 0}</span></div>${(this.bootstrap?.datasets ?? []).map((dataset) => `<div class="dataset-row"><div><strong>${esc(dataset.name)}</strong><small>${esc(dataset.symbol)} · ${esc(dataset.schema)} · ${number(dataset.barCount)} bars</small></div><span class="source-badge ${dataset.source === 'demo' ? 'synthetic' : ''}">${dataset.source === 'demo' ? 'SYNTHETIC' : esc(dataset.source.toUpperCase())}</span></div>`).join('') || '<p class="muted">No cached datasets yet.</p>'}</div></div>`, true);
+        this.showDialog('Data & settings', `<div class="data-settings"><div class="provider-heading"><span class="provider-logo">D</span><div><h3>Databento</h3><p>Exact futures contracts · official historical API</p></div><span id="provider-status" class="configured-badge ${this.bootstrap?.provider.configured ? 'configured' : ''}">${this.bootstrap?.provider.configured ? 'KEY CONFIGURED' : 'NO KEY'}</span></div><form id="provider-key-form"><label>API key<div class="key-row"><input id="provider-key" type="password" autocomplete="off" spellcheck="false" placeholder="Enter key to store securely on this computer" required /><button class="quiet" type="submit">Save key</button></div></label><p class="field-note">Protected for your Windows user. Never included in session exports.</p></form><hr /><form id="provider-quote-form"><div class="subheading"><h3>Request a cost preview</h3><span class="zero-budget">$0 ESTIMATE REQUIRED</span></div><p class="muted">Only an estimated $0 quote enables a separate download. The server re-quotes the exact scope first. The provider has no atomic billing cap: a $0 estimate cannot guarantee a zero invoice. This section downloads exact raw contracts only. Use Continuous history below for contract rolls.</p><div class="two-fields"><label>Raw contract symbol<input id="provider-symbol" value="NQZ6" placeholder="e.g. NQZ6" pattern="(?:MNQ|MES|NQ|ES|GC)[FGHJKMNQUVXZ][0-9]{1,2}" required /></label><label>Native OHLCV schema<select id="provider-schema"><option value="ohlcv-1m">ohlcv-1m · one-minute bars</option><option value="ohlcv-1s">ohlcv-1s · one-second bars</option></select></label></div><div class="two-fields"><label>Start · UTC<input id="provider-start" type="datetime-local" value="2026-10-01T13:30" required /></label><label>End · UTC<input id="provider-end" type="datetime-local" value="2026-10-01T20:00" required /></label></div><div class="preview-actions"><span>GLBX.MDP3 · raw symbol</span><button class="quiet" type="submit">Preview cost estimate</button></div></form><div id="quote-result"></div><hr /><div class="subheading"><h3>Import your own data</h3><span class="muted">CSV / JSONL</span></div><form id="dataset-import-form"><div class="two-fields"><label>Dataset name<input id="import-name" placeholder="My replay data" maxlength="120" /></label><label>Raw contract symbol<input id="import-symbol" value="NQZ6" pattern="(?:MNQ|MES|NQ|ES|GC)[FGHJKMNQUVXZ][0-9]{1,2}" required /></label></div><div class="two-fields"><label>Schema<select id="import-schema"><option value="ohlcv-1m">ohlcv-1m</option><option value="ohlcv-1s">ohlcv-1s</option></select></label><label>File format<select id="import-format"><option value="csv">CSV</option><option value="jsonl">JSONL</option></select></label></div><label>Choose a file<input id="dataset-file" type="file" accept=".csv,.jsonl,.ndjson,.json,.txt" /></label><label>Or paste OHLCV data<textarea id="import-text" rows="3" placeholder="time,open,high,low,close,volume&#10;2026-10-01T13:30:00Z,25000,25001,24999,25000.5,100"></textarea></label><p class="field-note">UTC timestamps or epoch milliseconds. Required: time, open, high, low, close and volume.</p><div class="preview-actions"><button class="text-button" type="button" data-action="demo">Use seeded synthetic demo ↗</button><button class="primary">Import & cache data</button></div></form><div class="cached-data"><div class="subheading"><h3>Cached datasets</h3><span class="muted">${this.bootstrap?.datasets.length ?? 0}</span></div>${(this.bootstrap?.datasets ?? []).map((dataset) => `<div class="dataset-row"><div><strong>${esc(dataset.name)}</strong><small>${esc(dataset.symbol)} · ${esc(dataset.schema)} · ${number(dataset.barCount)} bars</small></div><span class="source-badge ${dataset.source === 'demo' ? 'synthetic' : ''}">${dataset.source === 'demo' ? 'SYNTHETIC' : esc(dataset.source.toUpperCase())}</span></div>`).join('') || '<p class="muted">No cached datasets yet.</p>'}</div></div>`, true);
+        const host = document.createElement('div'); $('.data-settings').append(host);
+        this.historyControls = mountHistoryControls(host, this.api, { onImported: async () => {
+            await this.refreshIndex(); if (this.mode === 'stats') await this.statsPage?.refresh();
+        } });
+    }
+
+    private retireStatsPage(): void {
+        const page = this.statsPage; this.statsPage = null;
+        if (!page) return;
+        const work = page.prepare(); this.statsTasks.add(work);
+        void work.catch((error: unknown) => this.error(error)).finally(() => this.statsTasks.delete(work));
+        page.destroy();
+    }
+
+    private retireHistoryControls(): void {
+        const controls = this.historyControls; this.historyControls = null;
+        if (!controls) return;
+        const work = controls.prepare(); this.historyTasks.add(work);
+        void work.catch((error: unknown) => this.error(error)).finally(() => this.historyTasks.delete(work));
+        controls.destroy();
     }
 
     private invalidateQuote(): void {
@@ -1283,6 +1395,7 @@ class ReplayStudio {
     dispose(): void {
         if (this.disposed) return;
         this.disposed = true; this.pause(); clearTimeout(this.toastTimer);
+        this.retireStatsPage(); this.retireHistoryControls();
         this.dateTimePickers?.destroy(); this.dateTimePickers = null;
         this.runtime.dispose(); this.runtimeMessage.remove();
         this.navigationGeneration++; this.dashboard.destroy();

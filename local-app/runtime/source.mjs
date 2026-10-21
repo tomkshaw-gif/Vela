@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
-import { readdir, readFile, stat } from 'node:fs/promises';
-import { watch } from 'node:fs';
+import { lstat, readdir, readFile, stat } from 'node:fs/promises';
+import { existsSync, lstatSync, watch } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 
 const ROOT_FILES = new Set(['package.json', 'package-lock.json', 'tsconfig.json']);
@@ -9,7 +9,8 @@ export function relevantSource(filename) {
     const parts = filename.split(/[\\/]/);
     if (parts.length === 1) return ROOT_FILES.has(filename);
     if (parts.some(part => OMITTED.has(part)) || /\.(?:test|spec)\.[^.]+$/.test(filename)) return false;
-    return (parts[0] === 'src' || parts[0] === 'local-app') && /\.(?:ts|mts|cts|js|mjs|css|html|json|svg)$/.test(filename);
+    const vendor = parts[0] === 'vendor' && parts[1] === 'edge-stats';
+    return vendor || (parts[0] === 'src' || parts[0] === 'local-app') && /\.(?:ts|mts|cts|js|mjs|css|html|json|svg)$/.test(filename);
 }
 export async function sourceFingerprint(root) {
     const filenames = [];
@@ -22,6 +23,9 @@ export async function sourceFingerprint(root) {
         }
     }
     await walk('src'); await walk('local-app');
+    const vendor = await lstat(join(root, 'vendor/edge-stats')).catch(error => { if (error.code !== 'ENOENT') throw error; });
+    if (vendor?.isSymbolicLink()) throw new Error('Vendored source must not be linked outside the checkout.');
+    if (vendor?.isDirectory()) await walk('vendor/edge-stats');
     for (const filename of ROOT_FILES) if (await stat(join(root, filename)).then(value => value.isFile(), () => false)) filenames.push(filename);
     const hash = createHash('sha256');
     for (const filename of filenames.sort()) hash.update(filename.split(sep).join('/')).update('\0').update(await readFile(join(root, filename))).update('\0');
@@ -29,7 +33,13 @@ export async function sourceFingerprint(root) {
 }
 export function watchSources(root, onChange) {
     const watchers = [];
-    for (const directory of ['src', 'local-app', '.']) {
+    const directories = ['src', 'local-app', '.'];
+    const vendor = join(root, 'vendor/edge-stats');
+    if (existsSync(vendor)) {
+        if (lstatSync(vendor).isSymbolicLink()) throw new Error('Vendored source must not be linked outside the checkout.');
+        directories.push('vendor/edge-stats');
+    }
+    for (const directory of directories) {
         const watcher = watch(join(root, directory), { recursive: directory !== '.' }, (_event, filename) => {
             if (!filename) { onChange(); return; }
             const path = relative(root, join(root, directory, filename.toString()));

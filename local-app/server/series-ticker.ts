@@ -1,5 +1,5 @@
 import type { Bar } from '../shared/types';
-import { instrumentFor } from './data';
+import { continuousInstrument, instrumentFor } from './data';
 import { AppError } from './errors';
 
 export interface CachedTicker { symbol: string; modifier: 'heikinashi' | null }
@@ -27,10 +27,10 @@ export function parseCachedTicker(value: string): CachedTicker {
         if (typeof fields.symbol !== 'string') throw new AppError(400, 'Invalid encoded cached ticker symbol.');
         base = fields.symbol;
     }
-    const match = /^(?:[A-Za-z0-9_.-]+:)?([A-Za-z0-9]+)$/.exec(base);
+    const match = /^(?:[A-Za-z0-9_.-]+:)?([A-Za-z0-9]+|(?:NQ|GC)\.v\.0)$/.exec(base);
     if (!match) throw new AppError(400, 'Use one exact cached futures contract.');
     const symbol = match[1]!;
-    instrumentFor(symbol);
+    if (symbol.endsWith('.v.0')) continuousInstrument(symbol); else instrumentFor(symbol);
     return { symbol, modifier };
 }
 

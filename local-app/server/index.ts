@@ -24,6 +24,15 @@ import { SCRIPT_LIBRARY_LIMITS, ScriptLibrary } from './scripts';
 import { DeepHistoryService, validateDeepHistory } from './deep-history';
 import { appearanceModule } from './appearance';
 import { validateExecutionVersion } from '../engine/validation';
+import { MarketStatsController } from './stats-api';
+import { createMarketStatsService, createNodeMarketStatsJobFactory } from './market-stats';
+import { MarketStatsError } from './market-stats';
+import { buildPreset, getStatsPresetCatalog } from './stats-presets';
+import { createStatsArtifactService, artifactOperation } from './market-stats/artifacts';
+import { createNodeStatsArtifactJobFactory } from './market-stats/node-job';
+import { eventCalendars } from '@luxalgo/edge-stats/calendar-data';
+import { createHistoryController } from './history';
+import type { HistoryController } from './history-types';
 
 export { ReplayStore, saveDatabentoKey };
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -83,8 +92,22 @@ export async function createReplayServer(options: ServerOptions = {}) {
     const store = new ReplayStore(dataDirectory);
     const scripts = new ScriptLibrary(store.db);
     const deepHistory = new DeepHistoryService(store);
+    const sourceEntry = fileURLToPath(import.meta.url).endsWith('.ts');
+    let statsJobFactory: ReturnType<typeof createNodeMarketStatsJobFactory> | undefined;
+    let artifactJobFactory: ReturnType<typeof createNodeStatsArtifactJobFactory> | undefined;
+    const artifactService = createStatsArtifactService((input, operation) => (artifactJobFactory ??= createNodeStatsArtifactJobFactory({
+        workerUrl: new URL(sourceEntry ? './market-stats/worker.ts' : './market-stats-worker.mjs', import.meta.url),
+        scratchDirectory: join(dataDirectory, 'market-stats-jobs'), execArgv: sourceEntry ? ['--import', import.meta.resolve('tsx')] : [],
+    }))(input, operation));
+    const marketStats = new MarketStatsController(store, createMarketStatsService({ startJob: input => (statsJobFactory ??= createNodeMarketStatsJobFactory({
+        workerUrl: new URL(sourceEntry ? './market-stats/worker.ts' : './market-stats-worker.mjs', import.meta.url),
+        scratchDirectory: join(dataDirectory, 'market-stats-jobs'),
+        execArgv: sourceEntry ? ['--import', import.meta.resolve('tsx')] : [],
+    }))(input) }), artifactService);
     let apiKey: string | undefined;
     try { apiKey = options.apiKey ?? await loadDatabentoKey(dataDirectory); } catch (error) { store.close(); throw error; }
+    let history: HistoryController | undefined;
+    let historyImportActive = false;
     const token = randomBytes(32).toString('hex');
     const chartAgent = new ChartAgentBroker();
     const provider = new DatabentoProvider(store, () => apiKey, options.fetch);
@@ -126,6 +149,7 @@ export async function createReplayServer(options: ServerOptions = {}) {
                 const supplied = request.headers['x-local-token'];
                 if (typeof supplied !== 'string' || !/^[a-f0-9]{64}$/.test(supplied) || !timingSafeEqual(Buffer.from(supplied), Buffer.from(token))) throw new AppError(403, 'Missing local write token.', 'CSRF');
                 if (closing) throw new AppError(503, 'The local application is restarting.', 'UPDATE_PENDING');
+                if (historyImportActive && path !== '/api/runtime/client' && !/^\/api\/history\/history-[a-f0-9]{24}\/cancel$/.test(path)) throw new AppError(409, 'History import is finishing. Other changes can resume after it completes or is cancelled.', 'HISTORY_IMPORT_ACTIVE');
                 if (path !== '/api/runtime/client') {
                     if (runtime.preparing && path !== '/api/backtests' && !/^\/api\/deep-history\/[a-f0-9-]{36}\/release$/.test(path) && !/^\/api\/sessions\/[a-f0-9-]{36}\/command$/.test(path)) throw new AppError(503, 'The application is preparing an update. Try again after it reconnects.', 'UPDATE_PENDING');
                     activeWrites++; writing = true;
@@ -145,6 +169,73 @@ export async function createReplayServer(options: ServerOptions = {}) {
             if (method === 'GET' && path === '/api/bootstrap') { send(response, 200, { token, datasets: store.listDatasets(), sessions: store.sessions(), provider: { configured: !!apiKey }, instruments: INSTRUMENTS, dataDirectory }); return; }
             if (method === 'GET' && path === '/api/datasets') { send(response, 200, store.listDatasets()); return; }
             if (method === 'GET' && path === '/api/sessions') { send(response, 200, store.sessions()); return; }
+            const historyMatch = /^\/api\/history(?:\/(history-[a-f0-9]{24})(?:\/(run|cancel|import))?)?$/.exec(path);
+            if (historyMatch) {
+                if ([...url.searchParams.keys()].length) throw new AppError(400, 'History operations do not accept URL parameters.');
+                history ??= createHistoryController({ stagingDirectory: join(dataDirectory, 'history-staging'), key: () => apiKey, fetch: options.fetch });
+                const id = historyMatch[1]; const operation = historyMatch[2];
+                if (method === 'GET' && !operation) { send(response, 200, id ? history.status(id) : history.list()); return; }
+                if (method !== 'POST') throw new AppError(405, 'Method not allowed.');
+                const input = requireObject(await body(request, 4096)); assertSafeContent(input, apiKey);
+                if (!id) { send(response, 201, history.plan(input)); return; }
+                if (!operation) throw new AppError(405, 'Method not allowed.');
+                if (operation === 'import') {
+                    if (Object.keys(input).length !== 1 || !['NQ.v.0', 'GC.v.0'].includes(String(input.symbol))) throw new AppError(400, 'Choose one supported staged continuous contract.');
+                    if (activeWrites > 1) throw new AppError(409, 'Wait for other local changes before importing history.', 'HISTORY_IMPORT_ACTIVE');
+                } else if (Object.keys(input).length) throw new AppError(400, 'History run and cancel take an empty object.');
+                if (operation === 'cancel') { history.cancel(id); send(response, 200, { cancelled: true }); return; }
+                const controller = new AbortController();
+                const abort = () => controller.abort(); const disconnect = () => { if (!response.writableEnded) controller.abort(); };
+                request.once('aborted', abort); response.once('close', disconnect);
+                try {
+                    if (operation === 'import') historyImportActive = true;
+                    const result = operation === 'run' ? await history.run(id, { signal: controller.signal })
+                        : await history.importDataset(store, id, input.symbol as 'NQ.v.0' | 'GC.v.0', { signal: controller.signal });
+                    if (!response.destroyed) send(response, 200, result);
+                } finally {
+                    if (operation === 'import') historyImportActive = false;
+                    request.off('aborted', abort); response.off('close', disconnect);
+                }
+                return;
+            }
+            if (method === 'GET' && path === '/api/market-stats') { send(response, 200, marketStats.catalog()); return; }
+            if (path === '/api/market-stats/presets' || path === '/api/market-stats/preset') {
+                if (method === 'GET' && path.endsWith('/presets')) {
+                    if ([...url.searchParams.keys()].some(key => key !== 'events') || url.searchParams.getAll('events').length > 1 || url.searchParams.has('events') && url.searchParams.get('events') !== 'bundled') throw new AppError(400, 'Invalid statistics event calendar.');
+                    send(response, 200, getStatsPresetCatalog(url.searchParams.has('events') ? { events: eventCalendars } : {})); return;
+                }
+                if ([...url.searchParams.keys()].length) throw new AppError(400, 'Statistics templates do not accept URL parameters.');
+                if (method !== 'POST' || !path.endsWith('/preset')) throw new AppError(405, 'Method not allowed.');
+                const input = requireObject(await body(request, 4096)); assertSafeContent(input, apiKey);
+                const { eventCalendar, ...preset } = input;
+                if (eventCalendar !== undefined && eventCalendar !== 'bundled') throw new AppError(400, 'Invalid statistics event calendar.');
+                try { send(response, 200, buildPreset(preset, eventCalendar === 'bundled' ? { events: eventCalendars } : {})); }
+                catch (error) { if (error instanceof MarketStatsError) throw new AppError(400, error.message, error.code); throw error; }
+                return;
+            }
+            if (method === 'POST' && ['/api/market-stats/query', '/api/market-stats/session', '/api/market-stats/export'].includes(path)) {
+                if ([...url.searchParams.keys()].length) throw new AppError(400, 'Statistics queries do not accept URL parameters.');
+                const input = await body(request, 200_000); assertSafeContent(input, apiKey);
+                const controller = new AbortController();
+                const abort = () => controller.abort();
+                const disconnect = () => { if (!response.writableEnded) controller.abort(); };
+                request.once('aborted', abort); response.once('close', disconnect);
+                try {
+                    let result: unknown;
+                    if (path.endsWith('/query')) result = await marketStats.run(input, controller.signal);
+                    else {
+                        const item = requireObject(input);
+                        const allowed = path.endsWith('/session') ? ['request', 'sessionId', 'contextBars'] : ['request', 'format'];
+                        if (Object.keys(item).some(key => !allowed.includes(key))) throw new AppError(400, 'Unknown statistics artifact parameter.');
+                        const operation = path.endsWith('/session') ? { kind: 'session', sessionId: item.sessionId, contextBars: item.contextBars ?? 30 }
+                            : { kind: 'export', format: item.format };
+                        try { result = await marketStats.artifact(item.request, artifactOperation(operation), controller.signal); }
+                        catch (error) { if (error instanceof MarketStatsError) throw new AppError(400, error.message, error.code); throw error; }
+                    }
+                    if (!response.destroyed) send(response, 200, result);
+                } finally { request.off('aborted', abort); response.off('close', disconnect); }
+                return;
+            }
             const deepMatch = /^\/api\/deep-history(?:\/([a-f0-9-]{36})\/(series|release))?$/.exec(path);
             if (method === 'POST' && deepMatch) {
                 if ([...url.searchParams.keys()].length) throw new AppError(400, 'Deep history operations do not accept query parameters.');
@@ -234,7 +325,9 @@ export async function createReplayServer(options: ServerOptions = {}) {
                 const input = requireObject(await body(request, 64 * 1024 * 1024));
                 if ((input.version !== 1 && input.version !== 2) || Object.keys(input).some(key => !['version', 'session', 'dataset', 'bars'].includes(key))) throw new AppError(400, 'Unsupported session backup.');
                 if (validateExecutionVersion(input.session) !== input.version) throw new AppError(400, 'Session backup version does not match its execution data.');
-                const rawMeta = requireObject(input.dataset); const symbol = text(rawMeta.symbol, 'symbol', 16); const inst = instrumentFor(symbol); interval(rawMeta.schema);
+                const rawMeta = requireObject(input.dataset);
+                if (rawMeta.continuous !== undefined) throw new AppError(400, 'Continuous-history sessions require their verified staged source; legacy backups cannot restore contract identity.', 'HISTORY_BACKUP_UNSUPPORTED');
+                const symbol = text(rawMeta.symbol, 'symbol', 16); const inst = instrumentFor(symbol); interval(rawMeta.schema);
                 assertSafeContent(rawMeta, apiKey);
                 if (!['databento', 'csv', 'demo'].includes(String(rawMeta.source))) throw new AppError(400, 'Invalid dataset source.');
                 const schema = rawMeta.schema as DatasetMeta['schema']; const bars = validateBars(input.bars, schema, symbol);
@@ -272,7 +365,9 @@ export async function createReplayServer(options: ServerOptions = {}) {
                 if (method === 'GET' && action === 'analytics') { send(response, 200, analytics(session)); return; }
                 if (method === 'POST' && action === 'monte-carlo') { const input = requireObject(await body(request, 4096)); assertSafeContent(input, apiKey); send(response, 200, monteCarlo(session, input)); return; }
                 if (method === 'GET' && action === 'export') {
-                    response.setHeader('Content-Disposition', 'attachment; filename="replay-session.json"'); send(response, 200, { version: validateExecutionVersion(session), session, dataset: store.dataset(session.config.datasetId), bars: store.readBars(session.config.datasetId) }); return;
+                    const dataset = store.dataset(session.config.datasetId);
+                    if (dataset.barCount > 250_000 || dataset.continuous) throw new AppError(413, 'Legacy session backups support up to 250,000 exact-contract bars. Your continuous history remains saved locally with its verified source manifests.', 'HISTORY_EXPORT_TOO_LARGE');
+                    response.setHeader('Content-Disposition', 'attachment; filename="replay-session.json"'); send(response, 200, { version: validateExecutionVersion(session), session, dataset, bars: store.readBars(session.config.datasetId) }); return;
                 }
                 if (method === 'GET' && (action === 'chart' || action === 'series')) {
                     const dataset = store.dataset(session.config.datasetId);
@@ -347,17 +442,17 @@ export async function createReplayServer(options: ServerOptions = {}) {
                     if (expected !== session.revision) throw new AppError(409, 'Session changed. Reload it before continuing.', 'REVISION_CONFLICT');
                     const command = requireObject(input.command) as unknown as Command;
                     if (runtime.preparing && !['layout', 'rename', 'bookmark'].includes(command.type)) throw new AppError(503, 'The application is preparing an update. Try again after it reconnects.', 'UPDATE_PENDING');
-                    const bars = store.readBars(session.config.datasetId);
+                    const dataset = store.dataset(session.config.datasetId);
                     if (command.type === 'advance') integer(command.count, 1, 5000, 'advance count');
                     if (command.type === 'advanceTo') {
                         const target = integer(command.time, 0, 8_640_000_000_000_000, 'target time');
-                        const config = validateSessionConfig(session.config, bars.length);
-                        const endIndex = config.endIndex ?? bars.length;
+                        const config = validateSessionConfig(session.config, dataset.barCount);
+                        const endIndex = config.endIndex ?? dataset.barCount;
                         integer(session.cursor, config.startIndex - 1, endIndex - 1, 'cursor');
-                        let low = Math.max(0, session.cursor + 1); let high = endIndex;
-                        while (low < high) { const middle = Math.floor((low + high) / 2); if (bars[middle]!.time <= target) low = middle + 1; else high = middle; }
-                        if (low - session.cursor - 1 > 5000) throw new AppError(400, 'Advance is limited to 5,000 source bars per request.');
+                        const last = store.db.prepare('SELECT idx FROM bars WHERE dataset_id=? AND idx<? AND time<=? ORDER BY time DESC LIMIT 1').get(dataset.id, endIndex, target) as { idx: number } | undefined;
+                        if (last && last.idx - session.cursor > 5000) throw new AppError(400, 'Advance is limited to 5,000 source bars per request.');
                     }
+                    const bars = store.commandBars(dataset.id, session.cursor);
                     const next = applyCommand(session, bars, command);
                     send(response, 200, view(store.saveSession(next, expected))); return;
                 }
@@ -390,10 +485,10 @@ export async function createReplayServer(options: ServerOptions = {}) {
         },
         close(): Promise<void> {
             if (!closePromise) closePromise = (async () => {
-                closing = true; runtime.close(); chartAgent.close(); const deepStopped = deepHistory.close();
+                closing = true; runtime.close(); chartAgent.close(); const deepStopped = deepHistory.close(); const statsStopped = marketStats.dispose(); const historyStopped = history?.dispose() ?? Promise.resolve();
                 const stopped = server.listening ? new Promise<void>((resolveClose, reject) => { server.close(error => error ? reject(error) : resolveClose()); }) : Promise.resolve();
                 await Promise.allSettled([...requests]);
-                await stopped; await deepStopped; store.close();
+                await stopped; await deepStopped; await statsStopped; await historyStopped; store.close();
             })();
             return closePromise;
         },

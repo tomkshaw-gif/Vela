@@ -34,6 +34,10 @@ describe('production chart and management page composition', () => {
         }
         expect(document.querySelector('#session-manager #modal')).toBeNull();
         expect(document.querySelector('#standard-workspace #modal')).toBeNull();
+        const stats = document.querySelector<HTMLElement>('#market-stats-page')!;
+        expect(stats.hidden).toBe(true); expect(stats.getAttribute('aria-label')).toBe('Market Stats');
+        expect(stats.parentElement).toBe(document.querySelector('#standard-workspace')!.parentElement);
+        expect(stats.parentElement).toBe(document.querySelector('#session-manager')!.parentElement);
     });
     it('accepts accessibility attributes on the transport and fails closed if a required section disappears', () => {
         const markup = managementShell();

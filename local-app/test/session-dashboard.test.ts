@@ -12,7 +12,7 @@ function session(id: string, overrides: Partial<SessionSummary> = {}): SessionSu
 }
 function setup(sessions: SessionDashboardSnapshot['sessions'] = [session('first')]) {
     const host = document.createElement('div'); document.body.append(host);
-    const callbacks: SessionDashboardCallbacks = { newSession: vi.fn(), openSession: vi.fn(), openChart: vi.fn(), openData: vi.fn(), importSession: vi.fn() };
+    const callbacks: SessionDashboardCallbacks = { newSession: vi.fn(), openSession: vi.fn(), openChart: vi.fn(), openStats: vi.fn(), openData: vi.fn(), importSession: vi.fn() };
     const controller = mountSessionDashboard(host, callbacks); controllers.push(controller);
     const update = (extra: Partial<SessionDashboardSnapshot> = {}) => controller.update({ sessions, datasets: [dataset], ...extra });
     update(); return { host, callbacks, controller, update };
@@ -33,6 +33,12 @@ const names = (host: HTMLElement): string[] => Array.from(host.querySelectorAll(
 afterEach(() => { controllers.splice(0).forEach(item => item.destroy()); document.body.replaceChildren(); });
 
 describe('saved-session dashboard', () => {
+    it('offers Market Stats independently of saved sessions and ignores its callback after disposal', () => {
+        const { host, callbacks, controller } = setup([]);
+        const stats = Array.from(host.querySelectorAll('button')).find(item => item.textContent === 'Market Stats')!;
+        expect(stats).toBeDefined(); stats.click(); expect(callbacks.openStats).toHaveBeenCalledOnce();
+        controller.destroy(); stats.click(); expect(callbacks.openStats).toHaveBeenCalledOnce();
+    });
     it('opens with both saved metrics and sessions, and preserves filters when switching the internal views', () => {
         const { host, update, callbacks } = setup([session('first', { name: 'Opening range' }), session('second', { name: 'Afternoon range' })]);
         const tabs = Array.from(host.querySelectorAll<HTMLButtonElement>('[role=tab]'));

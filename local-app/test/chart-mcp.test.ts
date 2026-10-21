@@ -48,14 +48,15 @@ describe('local chart MCP', () => {
             expect(await initialized).toMatchObject({ id: 1, result: { serverInfo: { name: 'vela-local-chart' } } });
         } finally { lines.close(); child.stdin.end(); child.kill(); }
     }, 15_000);
-    it('advertises chart-only typed tools over a real MCP transport', async () => {
+    it('advertises chart and read-only research tools over a real MCP transport', async () => {
         const fetcher = vi.fn<typeof fetch>(); const ctx = await rpc(new LocalChartConnection('5199', fetcher));
         try {
             const result = await ctx.request('tools/list', {});
             const tools = (result.result as { tools: { name: string; inputSchema: unknown }[] }).tools;
-            expect(tools).toHaveLength(38);
+            expect(tools).toHaveLength(47);
             expect(tools.map(tool => tool.name)).toContain('vela_screenshot');
             expect(tools.map(tool => tool.name)).toEqual(expect.arrayContaining(['vela_run_script', 'vela_update_script', 'vela_read_script_context', 'vela_read_script_job', 'vela_cancel_script_job']));
+            expect(tools.map(tool => tool.name)).toEqual(expect.arrayContaining(['vela_research_apps', 'vela_edge_sources', 'vela_edge_fields', 'vela_edge_presets', 'vela_edge_query', 'vela_edge_report', 'vela_edge_session_bars', 'vela_backtest_sessions', 'vela_backtest_statistics']));
             expect(tools.every(tool => !/order|provider|export|shell|credential/.test(tool.name))).toBe(true);
             expect(tools.find(tool => tool.name === 'vela_add_drawing')?.inputSchema).toMatchObject({ type: 'object', required: ['target', 'args'] });
             expect(fetcher).not.toHaveBeenCalled();

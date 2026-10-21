@@ -98,6 +98,129 @@ Prop violations stop the attempt, cancel orders and flatten conservatively.
 All sessions/commands validate finite numbers and limits. No backward seek.
 Starting over creates a separate attempt and preserves the original.
 
+## Continuous minute history
+
+`server/history.ts` exposes `createHistoryController({stagingDirectory,key,fetch?})`.
+The explicit staging directory is application-owned and outside the checkout.
+`plan({symbols,start,end})`, `list()` and `status(jobId)` persist/return bounded job
+metadata; they never return raw market records, credentials or arbitrary paths.
+`run(jobId,{signal?})` finishes all remaining UTC-month chunks sequentially, with
+one active history operation per process and an exclusive acquisition lock per
+job. `cancel(jobId)` and `dispose()` cancel and drain downloads and imports.
+After a restart the same frozen plan identifies the existing manifest; completed
+months must pass raw/normalized/symbology SHA256 verification before reuse.
+
+Only canonical `NQ.v.0` and `GC.v.0` are accepted: Databento GLBX.MDP3 volume-ranked
+front month, one-minute bars, original unadjusted prices, from 2020 onward. GC is
+0.10 dollars per ounce per tick and 100 dollars per price point per contract.
+Exact-contract CSV/JSONL imports retain their existing scope and mixed-ID
+rejection; raw nanoprices use each instrument's own tick size.
+
+Each month resolves the free, dated `continuous -> instrument_id -> raw_symbol`
+mapping before querying its cost. Databento does not support direct
+`continuous -> raw_symbol` output. Every record must have exactly one matching
+dated instrument/raw-contract mapping. The exact frozen monthly billable scope
+is freshly quoted immediately before every data endpoint call; any nonzero,
+nonfinite or malformed cost stops acquisition. No source/encoding fallback may
+silently broaden the scope or bypass the zero-dollar budget.
+Transient provider timeouts/5xx may retry a month at most twice; every attempt
+repeats the exact fresh zero-cost quote, and invalid/nonzero quotes never retry.
+
+The persistent receipt records each monthly range, row count, raw/source and
+normalized hashes, mapping hash and completed state. Monthly response bytes and
+record lengths are bounded, normalized records are streamed, and source files
+remain in staging after interruption. No partially acquired logical dataset is
+visible. After separate review/backup/approval, the explicit
+`importDataset(store,jobId,symbol,{signal?})` verifies all source receipts and
+imports records incrementally in one SQLite transaction. It publishes a single
+logical dataset covering the complete requested history, with actual identity
+segments and provenance. Import cancellation or verification failure rolls back
+all its records. Continuous storage has a separate bounded ten-million-row
+budget (five million per dataset); regular import and engine command limits are
+unchanged.
+
+Import requires exclusive write access to the shared SQLite connection. Store
+dataset/session write methods and close reject while it is active; callers that
+write directly through `store.db` (such as script persistence) must be excluded by
+the HTTP/controller admission gate for the whole import, including yield points.
+Reads may continue; provisional rows have `ready=0` and public dataset readers
+exclude them. Shutdown must cancel/drain the history controller before store close.
+
+`store.readBarWindow(id,startIndex,limit)` bounds source reads to at most 250000
+records. `store.commandBars(id,cursor)` supplies an immutable global-indexed,
+array-compatible view containing at most the current/next 5001 bars plus the
+first-bar validation anchor. It cannot be serialized or read outside that window.
+Commands and SQL go-to preflight must use these bounded paths. `readBars` rejects
+large histories with `HISTORY_EXPORT_TOO_LARGE`; legacy exact-contract backup
+exports/imports remain unchanged. A complete continuous CSV/history export is
+not provided by the legacy backup route. Continuous charts currently support
+one-minute resolution; larger candles must not blend contract rolls.
+
+Continuous sessions carry `executionVersion:3`, retained through target-list
+changes and protected by the existing persistence anti-downgrade trigger. Older
+binaries reject that marker. Before processing the first bar of a different raw
+contract, the engine cancels working orders and flattens any old-contract position
+at the last revealed old-contract close, using the existing fee/spread/slippage
+model. New-contract OHLC cannot price the old position. No new position is opened
+automatically. A publisher ID remapping of the same raw contract is provenance,
+not a contract roll. This disclosed simulation policy prevents artificial roll
+gap P&L; it is not a reconstruction of live rollover execution.
+
+Market Stats accepts exact-contract minute sources and verified NQ/GC continuous
+sources. Contiguous raw-contract cohorts derive features independently. Mixed
+or partial contract sessions are omitted; prior-session ranges, ATR, streaks and
+next-session outcomes do not bridge rolls. The first complete feature of a new
+contract is marked separately for each session schedule.
+
+## Local market research
+
+The statistics engine is pinned to the version and commit recorded in
+`vendor/edge-stats/provenance.json`. Original source and data bytes are preserved.
+Code uses MIT terms; supplied reference event/holiday data retains CC BY
+attribution. The bundled CME holiday profile is for equity-index futures and is
+not an authoritative GC schedule. Schedule-only mode remains explicit.
+
+`GET /api/market-stats` lists local source coverage, saved replay revisions, the
+actual query registry and event-calendar metadata. The query, session-inspection
+and export POST routes use the existing loopback authentication and update
+barrier. They accept an explicit cached-history or revision-pinned replay scope,
+UTC bounds, a session schedule, a calendar choice and a bounded query. Cached
+history is separate from the replay clock. Replay reads never include a source
+bar whose exclusive close is beyond the captured revealed horizon.
+
+Queries use at most 250,000 one-minute source bars and ten years per request,
+100 returned session references/groups, and a bounded isolated worker. Raw
+contract identities, supplied calendar inputs and the exclusive cutoff enter
+the input fingerprint. Native handles and scratch files close before a request
+settles. Cancellation, timeout and shutdown await worker disposal. No market
+query changes account state or downloads data.
+
+Every estimate includes its own sample count. Estimates and intervals are
+withheld below ten observations; fewer than thirty carry warnings. This rule
+also applies independently to years, groups, recent history and each stability
+half. Unavailable comparisons remain null. Outcome distributions below ten
+observations are withheld with an explicit count/reason. Canonical AST, DSL and
+parameterized outcome identities must match the submitted query.
+
+`GET /api/market-stats/presets` lists all 42 official templates. The optional
+`events=bundled` selector supplies the pinned event calendars to template
+composition. `POST /api/market-stats/preset` accepts only template id, typed
+parameters, grouping and the optional `eventCalendar: bundled` choice; it uses
+the official composer/parser/compiler. Missing required data remains explicit.
+
+`POST /api/market-stats/session` accepts `{request,sessionId,contextBars?}` and
+inspects only an exact session in that query's returned references. It returns
+the native one-minute bars, derived levels, event times and bounded context.
+Context from a prior raw contract is removed. Inspection revalidates the saved
+replay revision and source scope; it cannot broaden a prior result silently.
+
+`POST /api/market-stats/export` accepts `{request,format}` for CSV or Parquet.
+The upstream exporter writes complete matching feature rows, including outcome
+columns, to a fixed job-owned scratch file. Outputs are capped at 8 MB and
+returned with row count, byte count, SHA256, source selection and query receipt.
+No caller-supplied path, general SQL, source-history backup, credential or
+arbitrary table export is exposed. Worker cleanup removes the temporary file.
+
 ## Local backend (`server/`)
 
 Bind only 127.0.0.1:5197 by default. Reject untrusted Host/Origin. All writes need
@@ -222,3 +345,23 @@ App-context reads project known bounded fields. Default manual session context
 contains revealed history only. Global saved backtest details require an explicit
 ID, and source requires an explicit flag. Client-reported results are validated
 and retain provenance; they do not become trusted execution attestations.
+
+The research tools work without an open chart. `vela_research_apps` discovers
+research availability; `vela_edge_sources`, `vela_edge_fields`,
+`vela_edge_presets`, `vela_edge_query`, `vela_edge_report` and
+`vela_edge_session_bars` expose the local engine and its explicit data scopes.
+`vela_backtest_sessions` and `vela_backtest_statistics` read saved manual replay
+context, separate from Pine strategy reports. Manual net P&L comes from closed
+trades; account drawdown and retained equity samples retain their own basis.
+Unavailable R coverage counts are not invented.
+
+Research calls require an explicit desktop, run or develop mode on the fixed
+loopback ports. An unavailable mode never falls back to another application.
+Bootstrap credentials stay private; authentication failures clear only the
+matching cached credential and do not retry a request. Source selection,
+replay revision and result provenance are checked again on each operation.
+Bundled event calendars require an explicit selector. Cancellation propagates
+from the MCP request to the HTTP request and isolated computation. Read-only
+research tools cannot place orders, advance replay, fetch provider data, execute
+a shell, select arbitrary destinations or write arbitrary paths. Existing chart
+edits continue to require their exact workspace target and generation.

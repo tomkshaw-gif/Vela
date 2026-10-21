@@ -6,6 +6,22 @@ All notable changes to Vela, newest first.
 
 ### Added
 
+- **Market Stats.** Research cached one-minute data from the dashboard with
+  setup frequencies, confidence intervals, sample guards and reproducible
+  results powered by the open-source Edge Stats engine. Replay scopes include
+  only revealed candles; schedule-only calendars are identified explicitly.
+  Explore the official report templates, inspect matched sessions and download
+  matching feature rows as CSV or Parquet. Event reports require an explicit
+  calendar choice and respect each calendar's coverage.
+- **AI research access.** Query local market statistics and official report
+  templates, inspect the candles behind a result, and read saved manual replay
+  statistics through the local AI bridge. Chart drawings, Pine analysis and
+  account results retain their separate scopes and source identities.
+- **Continuous futures history.** Stage and verify NQ and GC minute history in
+  resumable monthly downloads before adding it to the local cache. Continuous
+  replay preserves actual contract identities and closes positions at the last
+  old-contract close on a roll, with the configured execution costs.
+
 - **Partial exits and take-profit targets.** Close a percentage or an exact number
   of remaining contracts, and split an entry or open position across individual
   price targets. Each target keeps its own quantity and draggable chart line;
@@ -92,6 +108,10 @@ All notable changes to Vela, newest first.
   application runs on localhost and keeps credentials out of browser responses.
 
 ### Fixed
+
+- **Complete session review.** Session rename, clone and export actions are
+  reachable from the dashboard. Rejected orders retain their reasons, and
+  manual exits can be paged or downloaded across the complete retained ledger.
 
 - **Consistent replay snapshots.** Refreshing a chart keeps its candles and
   simulated quotes aligned with the account snapshot shown in that window,

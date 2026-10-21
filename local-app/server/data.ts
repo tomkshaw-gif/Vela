@@ -11,8 +11,8 @@ export function interval(schema: unknown): number {
     throw new AppError(400, 'Supported schemas are ohlcv-1m and ohlcv-1s.');
 }
 export function instrumentFor(symbol: unknown): Instrument {
-    if (typeof symbol !== 'string' || !/^(MNQ|MES|NQ|ES)[FGHJKMNQUVXZ]\d{1,4}$/.test(symbol)) throw new AppError(400, 'Use one exact NQ, MNQ, ES or MES raw futures contract.');
-    const root = /^(MNQ|MES|NQ|ES)/.exec(symbol)?.[1];
+    if (typeof symbol !== 'string' || !/^(MNQ|MES|NQ|ES|GC)[FGHJKMNQUVXZ]\d{1,4}$/.test(symbol)) throw new AppError(400, 'Use one exact NQ, MNQ, ES, MES or GC raw futures contract.');
+    const root = /^(MNQ|MES|NQ|ES|GC)/.exec(symbol)?.[1];
     const value = INSTRUMENTS.find(item => item.root === root);
     if (!value) throw new AppError(400, 'Unsupported contract.');
     return { ...value };
@@ -73,8 +73,9 @@ export function validateBars(input: unknown, schema: Schema, symbol: string, ran
         const price = (value: unknown, label: string): number => {
             if (!rawFixed) return numeric(value, label);
             const nano = BigInt(String(value));
-            if (nano % 250_000_000n !== 0n || nano <= 0n || nano > 10_000_000_000_000_000n) throw new AppError(400, 'Raw fixed prices must be exact positive contract ticks.');
-            return Number(nano / 250_000_000n) * 0.25;
+            const nanoTick = BigInt(Math.round(inst.tickSize * 1_000_000_000));
+            if (nano % nanoTick !== 0n || nano <= 0n || nano > 10_000_000_000_000_000n) throw new AppError(400, 'Raw fixed prices must be exact positive contract ticks.');
+            return Number(nano / nanoTick) * inst.tickSize;
         };
         const open = price(row.open, 'open'); const high = price(row.high, 'high');
         const low = price(row.low, 'low'); const close = price(row.close, 'close'); const volume = numeric(row.volume, 'volume');
@@ -82,6 +83,19 @@ export function validateBars(input: unknown, schema: Schema, symbol: string, ran
         for (const price of [open, high, low, close]) if (Math.abs(price / inst.tickSize - Math.round(price / inst.tickSize)) > 1e-7) throw new AppError(400, 'Price is not aligned to the contract tick size.');
         return { time, open, high, low, close, volume };
     });
+}
+export function continuousInstrument(symbol: unknown): Instrument {
+    if (symbol !== 'NQ.v.0' && symbol !== 'GC.v.0') throw new AppError(400, 'Use canonical NQ.v.0 or GC.v.0 volume-ranked front month.', 'INVALID_CONTINUOUS_SYMBOL');
+    return { ...INSTRUMENTS.find(instrument => instrument.root === symbol.slice(0, 2))! };
+}
+export function parseContinuousBar(raw: unknown, symbol: string, range: { start: number; end: number }): Bar & { instrumentId: string; contract: string } {
+    const instrument = continuousInstrument(symbol); const row = requireObject(raw); const hd = requireObject(row.hd);
+    const contract = row.symbol; const contractInstrument = instrumentFor(contract);
+    if (contractInstrument.root !== instrument.root) throw new AppError(400, 'Continuous data contains an unrelated futures contract.', 'INVALID_DATA');
+    const instrumentId = String(hd.instrument_id);
+    if (!/^[1-9]\d{0,9}$/.test(instrumentId) || Number(instrumentId) > 0xffff_ffff) throw new AppError(400, 'Continuous data must retain the actual instrument identity.', 'INVALID_DATA');
+    const bar = validateBars([row], 'ohlcv-1m', contract as string, range)[0]!;
+    return { ...bar, instrumentId, contract: contract as string };
 }
 export function parseImport(input: unknown): { name: string; symbol: string; schema: Schema; bars: Bar[] } {
     const obj = requireObject(input); const symbol = text(obj.symbol, 'symbol', 16); instrumentFor(symbol);

@@ -1,6 +1,16 @@
 import type { Bar, Instrument, OrderDraft, PropRules, Session, SessionConfig, TakeProfitLeg } from '../shared/types';
 
 export const LIMITS = { orders: 20000, fills: 40000, trades: 20000, curve: 10000, days: 10000, bookmarks: 1000, contracts: 1000, takeProfits: 10 };
+type SourceTimeLookup = Readonly<{ datasetId: string; maximumCursor: number; contains: (time: number, startIndex: number, cursor: number) => boolean }>;
+// This capability belongs to the exact store-created facade. Imported JSON and
+// array properties cannot supply a lookup or extend its revealed source range.
+const sourceTimeLookups = new WeakMap<Bar[], SourceTimeLookup>();
+export function registerSourceTimeLookup(bars: Bar[], lookup: SourceTimeLookup): void {
+    if (!Array.isArray(bars) || sourceTimeLookups.has(bars)) throw new Error('Source-time lookup requires a new source facade');
+    id(lookup.datasetId, 'Source dataset ID'); integer(lookup.maximumCursor, 'Source cursor', -1, bars.length - 1);
+    if (typeof lookup.contains !== 'function') throw new Error('Source-time lookup is invalid');
+    sourceTimeLookups.set(bars, Object.freeze({ ...lookup }));
+}
 export const money = (n: number): number => Math.round((n + Math.sign(n) * Number.EPSILON) * 100) / 100;
 export const object = (v: unknown, label: string): Record<string, unknown> => {
     if (!v || typeof v !== 'object' || Array.isArray(v)) throw new Error(`${label} must be an object`);
@@ -114,13 +124,13 @@ export function validateTakeProfits(value: unknown, instrument: Instrument, owne
     return legs;
 }
 /** A missing marker is legacy only when no version-two execution fields are present. */
-export function validateExecutionVersion(input: unknown): 1 | 2 {
+export function validateExecutionVersion(input: unknown): 1 | 2 | 3 {
     const x = object(input, 'Session');
-    if (x.executionVersion !== undefined && x.executionVersion !== 2) throw new Error('Unsupported execution version');
+    if (x.executionVersion !== undefined && x.executionVersion !== 2 && x.executionVersion !== 3) throw new Error('Unsupported execution version');
     const has = (value: unknown, key: string): boolean => !!value && typeof value === 'object' && !Array.isArray(value) && Object.hasOwn(value, key);
     const entriesHave = (value: unknown, key: string): boolean => Array.isArray(value) && value.some(entry => has(entry, key));
     if (x.executionVersion === undefined && (has(x.position, 'takeProfits') || entriesHave(x.orders, 'takeProfits') || entriesHave(x.fills, 'takeProfitLegId') || entriesHave(x.trades, 'takeProfitLegId'))) throw new Error('Target legs and provenance require execution version 2');
-    return x.executionVersion === 2 ? 2 : 1;
+    return x.executionVersion === 3 ? 3 : x.executionVersion === 2 ? 2 : 1;
 }
 export function safeLayout(v: unknown): unknown {
     let nodes = 0;
@@ -166,11 +176,19 @@ export function validateStoredSession(input: unknown, bars: Bar[], expectedInstr
     const instrument = validateInstrument(x.instrument);
     if (JSON.stringify(instrument) !== JSON.stringify(validateInstrument(expectedInstrument))) throw new Error('Session instrument does not match dataset');
     const cursor = integer(x.cursor, 'Cursor', config.startIndex - 1, (config.endIndex ?? bars.length) - 1);
+    const sourceLookup = sourceTimeLookups.get(bars);
+    if (sourceLookup && (sourceLookup.datasetId !== config.datasetId || cursor > sourceLookup.maximumCursor)) throw new Error('Session does not match the bounded revealed source');
+    if (executionVersion === 3) {
+        for (const bar of [bars[0]!, ...(cursor >= 0 ? [bars[cursor]!] : [])]) {
+            if (typeof bar.instrumentId !== 'string' || !/^[1-9]\d{0,9}$/.test(bar.instrumentId) || Number(bar.instrumentId) > 0xffff_ffff
+                || typeof bar.contract !== 'string' || !new RegExp(`^${instrument.root}[FGHJKMNQUVXZ]\\d{1,4}$`).test(bar.contract)) throw new Error('Execution version 3 requires continuous source contract provenance');
+        }
+    }
     if (cursor >= 0) validateBar(bars[cursor]!, instrument);
     const a = object(x.account, 'Account');
     const p = object(x.prop, 'Prop state');
     const session: Session = {
-        ...(executionVersion === 2 ? { executionVersion: 2 } : {}),
+        ...(executionVersion >= 2 ? { executionVersion: executionVersion as 2 | 3 } : {}),
         id: id(x.id, 'Session ID'), config, instrument, cursor,
         status: choice(x.status, ['paused', 'completed', 'passed', 'failed'], 'Session status'),
         revision: integer(x.revision, 'Revision', 0, Number.MAX_SAFE_INTEGER - 1),
@@ -244,10 +262,16 @@ export function validateStoredSession(input: unknown, bars: Bar[], expectedInstr
     let ledger: { side: 'buy' | 'sell'; qty: number; price: number; fees: number; time: number } | null = null;
     let closedTrades = 0;
     const equalPrice = (left: number, right: number): boolean => Math.abs(left - right) <= 1e-7 * Math.max(1, Math.abs(left) / 1000000);
+    const checkedTimes = new Map<number, boolean>();
     const sourceTime = (time: number): boolean => {
+        const checked = checkedTimes.get(time); if (checked !== undefined) return checked;
+        if (sourceLookup) {
+            const found = sourceLookup.contains(time, config.startIndex, cursor) === true;
+            checkedTimes.set(time, found); return found;
+        }
         let low = config.startIndex; let high = cursor;
-        while (low <= high) { const mid = Math.floor((low + high) / 2); const candidate = bars[mid]!.time; if (candidate === time) return true; if (candidate < time) low = mid + 1; else high = mid - 1; }
-        return false;
+        while (low <= high) { const mid = Math.floor((low + high) / 2); const candidate = bars[mid]!.time; if (candidate === time) { checkedTimes.set(time, true); return true; } if (candidate < time) low = mid + 1; else high = mid - 1; }
+        checkedTimes.set(time, false); return false;
     };
     for (let index = 0; index < session.fills.length; index++) {
         const f = session.fills[index]!;

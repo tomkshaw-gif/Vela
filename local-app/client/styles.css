@@ -42,8 +42,34 @@ dialog{padding:0;width:min(490px,calc(100vw - 35px));max-height:calc(100vh - 60p
 
 /* The chart page uses Vela's own chrome. Management stays on its separate route. */
 html,body,#app{height:100%;min-height:0;overflow:hidden}
-#standard-workspace{position:fixed;inset:0;background:#0f0f0f}
-#standard-workspace>.chart-stage{height:100%;min-height:0}
+#standard-workspace{position:fixed;inset:0;background:#0f0f0f;display:flex;flex-direction:column}
+#standard-workspace[hidden]{display:none!important}
+#standard-workspace>.chart-stage{flex:1;height:auto;min-height:0}
+.local-session-bar{flex:none;display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:36px;padding:4px 12px;border-bottom:1px solid #292929;background:#141414;color:#dbdbdb}
+.local-session-bar>div{min-width:0;display:flex;align-items:baseline;gap:12px}
+.local-session-bar #session-name{font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.local-session-bar #session-kicker{font-size:10px;color:#9598a1;white-space:nowrap}
+.local-session-actions{position:relative;flex:none;font-size:12px}
+.local-session-actions[hidden],.rejected-orders[hidden]{display:none!important}
+.local-session-actions summary{padding:5px 8px;cursor:pointer;border:1px solid #383838;border-radius:4px}
+.local-session-actions>div{position:absolute;right:0;top:100%;z-index:70;display:flex;flex-direction:column;min-width:190px;padding:4px;background:#202020;border:1px solid #454545;border-radius:4px;box-shadow:0 6px 20px #0008}
+.local-session-actions button{padding:9px 12px;text-align:left;font:inherit;background:transparent;border:0;border-radius:3px}
+.local-session-actions button:hover{background:#343434}
+.local-session-actions button:disabled{opacity:.5;cursor:default}
+.local-session-actions :focus-visible,.review-pagination button:focus-visible{outline:2px solid #6ba4ff;outline-offset:2px}
+.review-pagination{display:flex;align-items:center;flex-wrap:wrap;gap:8px;padding:8px 12px}
+.review-pagination .review-coverage{flex:1;min-width:180px;margin:0;font-size:12px;color:#b8b8b8}
+.review-pagination .quiet{font-size:12px;padding:6px 9px;border:1px solid #414141}
+.rejected-orders{grid-column:1 / -1;padding:12px;border-top:1px solid #414141}
+.rejected-orders h2{font-size:13px;margin:0 0 6px}
+.rejected-orders>.review-coverage{margin:6px 0;font-size:12px;color:#b8b8b8}
+.rejected-order{padding:10px 0;border-bottom:1px solid #333;overflow-wrap:anywhere}
+.rejected-order strong{font-size:12px;color:#f19098}
+.rejected-order time{display:block;margin-top:4px;font-size:11px;color:#aaa}
+.rejected-order p{margin:6px 0 0;font-size:12px;color:#dbdbdb}
+.results-tabs .rejected-count{font-size:11px;color:#f19098}
+.rejected-count[hidden]{display:none!important}
+@media(max-width:700px){.local-session-bar #session-kicker{display:none}.local-session-bar{padding:4px 8px}.review-pagination .review-coverage{flex-basis:100%}}
 #standard-workspace #chart{height:100%;min-height:0}
 #standard-workspace .chart-empty{background:#0f0f0f;color:#dbdbdb;gap:12px}
 #standard-workspace .chart-empty h2{font-size:18px;font-weight:500}
