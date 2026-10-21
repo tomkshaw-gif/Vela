@@ -236,8 +236,13 @@ export class ReplayStore {
         const floor = after === undefined ? 0 : timeframeBucket(after, period);
         const order = after === undefined ? 'DESC' : 'ASC';
         if (period.intervalMs === meta.intervalMs) {
-            const rows = this.db.prepare(`SELECT time,open,high,low,close,volume FROM bars WHERE dataset_id=? AND idx<=? AND time>=? AND time<=? ORDER BY time ${order} LIMIT ?`).all(id, cursor, floor, Math.min(until, cursorBar?.time ?? -1), limit + 1) as unknown as Bar[];
-            const hasMore = rows.length > limit; const bars = rows.slice(0, limit); if (after === undefined) bars.reverse();
+            const rows = this.db.prepare(`SELECT time,open,high,low,close,volume,instrument_id,contract FROM bars WHERE dataset_id=? AND idx<=? AND time>=? AND time<=? ORDER BY time ${order} LIMIT ?`).all(id, cursor, floor, Math.min(until, cursorBar?.time ?? -1), limit + 1) as unknown as (Bar & { instrument_id: string | null; contract: string | null })[];
+            const hasMore = rows.length > limit;
+            const bars = rows.slice(0, limit).map(({ instrument_id, contract, ...bar }) => {
+                if (meta.continuous && (!instrument_id || !contract)) throw new AppError(400, 'Continuous source contract provenance is missing.', 'INVALID_HISTORY');
+                return { ...bar, ...(instrument_id && contract ? { instrumentId: instrument_id, contract } : {}) };
+            });
+            if (after === undefined) bars.reverse();
             return { bars, timeframe, intervalMs: meta.intervalMs, baseIntervalMs: meta.intervalMs, cursorTime: cursorBar?.time ?? null, hasMore };
         }
         const expression = period.unit === 'month' ? 'vela_month_bucket(time,?)' : period.unit === 'week' ? 'CAST((time+259200000)/? AS INTEGER)*?-259200000' : 'CAST(time/? AS INTEGER)*?';

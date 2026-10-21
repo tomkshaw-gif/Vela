@@ -128,8 +128,9 @@ describe('read-only application context', () => {
         const { context } = harness({}, { [`/api/backtests/${runId}`]: saved });
         const output = await context.readBacktest({ id: runId, includeSource: true });
         const json = JSON.stringify(output);
-        expect(json).not.toContain('forbidden'); expect(json).not.toContain('private-token'); expect(json).not.toContain('C:\\\\Users'); expect(json).not.toContain('/home/private'); expect(json).not.toContain('/custom/private');
-        expect(output).toMatchObject({ properties: { capital: 50000 }, inputs: { safe: '[local path]' }, sourceIncluded: true });
+        expect(json).not.toContain('forbidden'); expect(json).not.toContain('private-token'); expect(json).not.toContain('C:\\\\Users'); expect(json).not.toContain('/custom/private');
+        expect(output).toMatchObject({ properties: { capital: 50000 }, inputs: { safe: '[local path]' }, sourceIncluded: true, sourceRedacted: true, sourceTruncated: false });
+        expect(output.source).toContain('// /home/private/key.txt');
     });
 
     it('rejects oversized multibyte payloads instead of returning a misleading complete source', async () => {

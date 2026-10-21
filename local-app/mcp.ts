@@ -6,6 +6,7 @@ import { pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import type { ChartAgentOperation } from './shared/chart-agent';
 import { LocalResearchConnection, registerResearchTools } from './mcp-research';
+import { parseScenarioContent, SCENARIO_LIMITS } from './shared/scenarios';
 
 class ChartOperationError extends Error {}
 
@@ -17,10 +18,12 @@ export class LocalChartConnection {
         if (!['5196', '5197', '5199'].includes(port)) throw new Error('Use local Vela port 5196, 5197 or 5199.');
         this.origin = `http://127.0.0.1:${port}`;
     }
-    private async json(path: string, body?: unknown): Promise<unknown> {
+    private async json(path: string, body?: unknown, signal?: AbortSignal): Promise<unknown> {
+        signal?.throwIfAborted();
         const response = await this.request(this.origin + path, { method: body === undefined ? 'GET' : 'POST',
             headers: body === undefined ? {} : { 'Content-Type': 'application/json', 'X-Local-Token': this.token },
-            body: body === undefined ? undefined : JSON.stringify(body), redirect: 'error', signal: AbortSignal.timeout(12_000) });
+            body: body === undefined ? undefined : JSON.stringify(body), redirect: 'error',
+            signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(12_000)]) : AbortSignal.timeout(12_000) });
         if (!response.ok) {
             if (response.status === 403) this.token = '';
             // Never surface an arbitrary HTTP response or bootstrap to the model.
@@ -47,14 +50,15 @@ export class LocalChartConnection {
         return JSON.parse(raw) as unknown;
     }
     async clients(): Promise<unknown> { this.token = ''; return this.json('/api/assistant/clients'); }
-    async call(operation: ChartAgentOperation, target: unknown, args: unknown): Promise<unknown> {
+    async call(operation: ChartAgentOperation, target: unknown, args: unknown, signal?: AbortSignal): Promise<unknown> {
+        signal?.throwIfAborted();
         if (!this.token) {
-            const bootstrap = await this.json('/api/bootstrap') as { token?: unknown };
+            const bootstrap = await this.json('/api/bootstrap', undefined, signal) as { token?: unknown };
             if (typeof bootstrap.token !== 'string' || !/^[a-f0-9]{64}$/.test(bootstrap.token)) throw new Error('The local chart bridge did not return a valid connection.');
             this.token = bootstrap.token;
         }
         const requestId = randomUUID();
-        try { return await this.json('/api/assistant/call', { operation, target, args, requestId }); }
+        try { return await this.json('/api/assistant/call', { operation, target, args, requestId }, signal); }
         catch (error) {
             const detail = error instanceof ChartOperationError ? error.message : 'The local chart connection ended before an outcome was received.';
             if (operation === 'read_operation') throw new ChartOperationError(detail);
@@ -85,11 +89,11 @@ export class LocalChartConnections {
         if (results.every(result => result.status === 'rejected')) throw new Error('The local chart bridge is unavailable.');
         return results.flatMap(result => result.status === 'fulfilled' ? result.value : []);
     }
-    call(operation: ChartAgentOperation, target: unknown, args: unknown): Promise<unknown> {
+    call(operation: ChartAgentOperation, target: unknown, args: unknown, signal?: AbortSignal): Promise<unknown> {
         const id = (target as { clientId?: unknown } | null)?.clientId;
         const connection = typeof id === 'string' ? this.targets.get(id) : undefined;
         if (!connection) return Promise.reject(new Error('Chart target changed. List workspaces again.'));
-        return connection.call(operation, target, args);
+        return connection.call(operation, target, args, signal);
     }
 }
 
@@ -112,9 +116,9 @@ export function createChartMcp(connection: Pick<LocalChartConnection, 'clients' 
     });
     const tool = (operation: ChartAgentOperation, description: string, args: z.ZodType, readOnly: boolean): void => {
         server.registerTool(`vela_${operation}`, { description, inputSchema: z.object({ target, args }).strict(),
-            annotations: { readOnlyHint: readOnly, destructiveHint: operation.startsWith('remove_'), openWorldHint: false } }, async ({ target: chart, args: values }) => {
+            annotations: { readOnlyHint: readOnly, destructiveHint: operation.startsWith('remove_'), openWorldHint: false } }, async ({ target: chart, args: values }, ctx) => {
             try {
-                const value = await connection.call(operation, chart, values);
+                const value = await connection.call(operation, chart, values, ctx.mcpReq.signal);
                 if (operation === 'screenshot') {
                     const image = value as { data?: unknown; mimeType?: unknown; width?: unknown; height?: unknown };
                     if (typeof image.data !== 'string' || image.data.length > 1_600_000 || !/^[A-Za-z0-9+/]*={0,2}$/.test(image.data) || !['image/png', 'image/jpeg'].includes(String(image.mimeType))) throw new Error('Invalid chart image response.');
@@ -130,6 +134,16 @@ export function createChartMcp(connection: Pick<LocalChartConnection, 'clients' 
         });
     };
     const empty = z.object({}).strict();
+    const scenarioPrice = z.number().finite().min(-1e12).max(1e12).nullable();
+    const scenarioCase = z.object({ thesis: z.string().max(4000), trigger: z.string().max(2000), invalidation: z.string().max(2000),
+        triggerPrice: scenarioPrice, invalidationPrice: scenarioPrice, targetPrice: scenarioPrice,
+        projectedTime: z.number().int().min(0).max(8_640_000_000_000_000).nullable() }).strict();
+    const scenarioContent = z.object({ title: z.string().min(1).max(120), bull: scenarioCase, bear: scenarioCase, notes: z.string().max(8000),
+        evidence: z.array(z.object({ kind: z.literal('candle'), sourceIndex: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+            time: z.number().int().min(0).max(8_640_000_000_000_000), note: z.string().max(1000) }).strict()).max(SCENARIO_LIMITS.evidence) }).strict()
+        .refine(value => { try { parseScenarioContent(value); return true; } catch { return false; } }, 'Invalid bounded scenario content.');
+    tool('read_candle_evidence', 'Explain one exact revealed candle, selectedTime in UTC epoch milliseconds or the latest revealed candle when omitted. Captures a fixed scope through the loaded replay clock. Returns deterministic raw OHLCV arithmetic, actual displayed values with explicit transform, bounded prior comparisons and exact evidence IDs/formulas/provenance. Forming candles use revealed source bars only. Causes/news/order types are unavailable from price-only bars. No model call, replay advance or chart mutation.', z.object({ selectedTime: z.number().int().min(0).max(4_102_444_800_000).optional() }).strict(), true);
+    tool('propose_scenario', 'Place a bull/bear/invalidation hypothesis in the local scenario notebook as an editable draft for the exact loaded session/dataset/cursor. The response explicitly reports draftOnly and its context. This does not save to the HTTP library, preview annotations, draw on the chart, advance replay or place orders. The user separately chooses Save or Preview. Evidence references must be revealed source candles; projected hypothesis times may be future.', z.object({ content: scenarioContent }).strict(), false);
     tool('read_analysis_request', 'Read the question and pinned chart region queued through the chart AI panel. The external AI host can then inspect candles, calculate unplotted studies, or draw on the chart. Requests expire with their scope; no model request is started inside Vela.', empty, true);
     tool('backtest_indicator', 'Open the actual strategy tester for an exact existing Pine strategy on the active chart. Default replay mode uses revealed candles only. Deep mode requires explicit epoch-ms from/to and uses selected cached history beyond replay; never use it for blind replay analysis. Returns an asynchronous job; the shared tester UI, cancellation, save and export remain available. No manual order or replay advance is placed.', z.object({ id: z.string().min(1).max(100), mode: z.enum(['replay', 'deep']).optional(), from: z.number().int().nonnegative().optional(), to: z.number().int().nonnegative().optional() }).strict(), false);
     tool('read_backtest_job', 'Read a strategy tester job and the exact report generation it published, with result totals and save status. This result is separate from the manual replay account.', z.object({ jobId: z.uuid() }).strict(), true);
@@ -138,9 +152,9 @@ export function createChartMcp(connection: Pick<LocalChartConnection, 'clients' 
     const detailLimit = z.number().int().min(1).max(500).optional();
     tool('read_session', 'Read this manual replay account, positions, prop rules/status, costs, orders, fills, trades and bookmarks. This ledger is separate from Pine strategy results. Only current revealed session history is returned.', z.object({ limit: detailLimit }).strict(), true);
     tool('list_scripts', 'List local saved Pine document metadata. Source is omitted. Saved documents are global library context, independent of the replay clock.', z.object({ ...metadataPage, includeArchived: z.boolean().optional() }).strict(), true);
-    tool('read_script', 'Read an explicit saved Pine document/version and version metadata. Source is included only on request. Library context can describe work from other sessions.', z.object({ id: z.uuid(), version: z.number().int().min(1).optional(), includeSource: z.boolean().optional() }).strict(), true);
+    tool('read_script', 'Read an explicit saved Pine document/version and version metadata. Source is included only on request and preserves code syntax/path literals except credential redaction; sourceRedacted/sourceTruncated report changes. Library context can describe work from other sessions.', z.object({ id: z.uuid(), version: z.number().int().min(1).optional(), includeSource: z.boolean().optional() }).strict(), true);
     tool('list_backtests', 'Explicitly inspect metadata for saved historical Pine backtests, including Deep runs that may extend beyond the current replay. No saved result ledger is included in this list.', z.object({ ...metadataPage, strategyId: z.uuid().optional() }).strict(), true);
-    tool('read_backtest', 'Explicitly read a saved historical result by ID. Results may include future replay history and are client-reported snapshots, not execution-signed results. Keep them separate from blind replay analysis.', z.object({ id: z.uuid(), limit: detailLimit, includeSource: z.boolean().optional() }).strict(), true);
+    tool('read_backtest', 'Explicitly read a saved historical result by ID. Results may include future replay history and are client-reported snapshots, not execution-signed results. Keep them separate from blind replay analysis. Opted-in source preserves code syntax/path literals except credential redaction; sourceRedacted/sourceTruncated report changes.', z.object({ id: z.uuid(), limit: detailLimit, includeSource: z.boolean().optional() }).strict(), true);
     tool('read_workspace', 'Read current layout, cells, active cell and synchronization metadata. Serialized extensions and script source are omitted.', empty, true);
     tool('list_templates', 'List local chart, indicator and layout template metadata. Template contents and source are omitted.', z.object(metadataPage).strict(), true);
     tool('read_current_result', 'Explicitly inspect the current strategy report. Pass the completed backtest job generation as expectedGeneration to reject a replaced report. This may be a loaded saved or Deep result beyond the replay clock, separate from the manual replay ledger.', z.object({ limit: detailLimit, expectedGeneration: z.number().int().nonnegative().optional() }).strict(), true);

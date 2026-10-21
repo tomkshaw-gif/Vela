@@ -53,8 +53,9 @@ describe('local chart MCP', () => {
         try {
             const result = await ctx.request('tools/list', {});
             const tools = (result.result as { tools: { name: string; inputSchema: unknown }[] }).tools;
-            expect(tools).toHaveLength(47);
+            expect(tools).toHaveLength(50);
             expect(tools.map(tool => tool.name)).toContain('vela_screenshot');
+            expect(tools.map(tool => tool.name)).toEqual(expect.arrayContaining(['vela_read_candle_evidence', 'vela_propose_scenario', 'vela_compare_event_sessions']));
             expect(tools.map(tool => tool.name)).toEqual(expect.arrayContaining(['vela_run_script', 'vela_update_script', 'vela_read_script_context', 'vela_read_script_job', 'vela_cancel_script_job']));
             expect(tools.map(tool => tool.name)).toEqual(expect.arrayContaining(['vela_research_apps', 'vela_edge_sources', 'vela_edge_fields', 'vela_edge_presets', 'vela_edge_query', 'vela_edge_report', 'vela_edge_session_bars', 'vela_backtest_sessions', 'vela_backtest_statistics']));
             expect(tools.every(tool => !/order|provider|export|shell|credential/.test(tool.name))).toBe(true);

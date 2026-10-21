@@ -65,13 +65,20 @@ function id(value: unknown): string {
     if (typeof value !== 'string' || !UUID.test(value)) throw new Error('An explicit valid saved document or result ID is required.');
     return value;
 }
-function clean(value: string, max = 1024): string {
-    return value.slice(0, max)
-        .replace(/(?:[a-z]:[\\/]|\\\\)[^\s"'<>]*/gi, '[local path]')
-        .replace(/(^|[\s"'=(])\/(?!\/)[^\s"'<>]+/g, '$1[local path]')
-        .replace(/\b(?:sk-[a-z0-9_-]{12,}|Bearer\s+[a-z0-9._~-]+)/gi, '[credential]')
+function redactCredentials(value: string): string {
+    return value.replace(/\b(?:sk-[a-z0-9_-]{12,}|Bearer\s+[a-z0-9._~-]+)/gi, '[credential]')
         .replace(/\b(api[_-]?key|authorization|cookie|password|secret|token|credential)["']?\s*[:=]\s*(?:"[^"\n]*"|'[^'\n]*'|[^\s,;]+)/gi, '$1=[credential]')
         .replace(/\b(https?:\/\/)[^\s/@]+:[^\s/@]+@/gi, '$1[credential]@');
+}
+function clean(value: string, max = 1024): string {
+    return redactCredentials(value.slice(0, max)
+        .replace(/(?:[a-z]:[\\/]|\\\\)[^\s"'<>]*/gi, '[local path]')
+        .replace(/(^|[\s"'=(])\/(?!\/)[^\s"'<>]+/g, '$1[local path]'));
+}
+/** Opted-in code retains its syntax and path literals; only credential redaction may alter it. */
+function sourceProjection(value: string): Fields {
+    const redacted = redactCredentials(value);
+    return { source: redacted.slice(0, 200000), sourceRedacted: redacted !== value, sourceTruncated: redacted.length > 200000 };
 }
 function scalar(value: unknown): string | number | boolean | null | undefined {
     if (typeof value === 'string') return clean(value);
@@ -186,7 +193,7 @@ export function createAppAgentContext(options: AppAgentContextOptions): AppAgent
             else if (version !== undefined) document = versions.find(item => item.version === version);
             else document = (await options.api.get<ScriptSummary[]>('/api/scripts?includeArchived=true', signal)).find(item => item.id === scriptId);
             if (!document) throw new Error('The requested saved script or version is unavailable.');
-            return finish({ scope: 'global-script-library-document', sourceIncluded: source, document: pick(document, [...SCRIPT_FIELDS, 'scriptId', 'version']), ...(version === undefined ? { versions: page(versions, 100, item => pick(item, ['scriptId', 'version', 'name', 'createdAt'])) } : {}), ...(source && 'source' in document ? { source: clean(document.source, 200000) } : {}) });
+            return finish({ scope: 'global-script-library-document', sourceIncluded: source, document: pick(document, [...SCRIPT_FIELDS, 'scriptId', 'version']), ...(version === undefined ? { versions: page(versions, 100, item => pick(item, ['scriptId', 'version', 'name', 'createdAt'])) } : {}), ...(source && 'source' in document ? sourceProjection(document.source) : {}) });
         },
         async listBacktests(args, signal) {
             const input = request(args, ['limit', 'offset', 'strategyId']);
@@ -199,7 +206,7 @@ export function createAppAgentContext(options: AppAgentContextOptions): AppAgent
             const input = request(args, ['id', 'limit', 'includeSource']);
             const runId = id(input.id), limit = number(input.limit, 100, 500), source = flag(input.includeSource);
             const run = await options.api.get<StoredBacktest>(`/api/backtests/${runId}`, signal);
-            return finish({ scope: run.history ? 'global-deep-historical-pine-result' : 'global-historical-pine-result', engine: 'pine-strategy', replaySafe: false, immutable: true, sourceIncluded: source, metadata: runMetadata(run), inputs: settings(run.inputs), properties: settings(run.properties), provenance: provenance(run.provenance), result: pineResult(run.result, limit), ...(source ? { source: clean(run.source, 200000) } : {}) });
+            return finish({ scope: run.history ? 'global-deep-historical-pine-result' : 'global-historical-pine-result', engine: 'pine-strategy', replaySafe: false, immutable: true, sourceIncluded: source, metadata: runMetadata(run), inputs: settings(run.inputs), properties: settings(run.properties), provenance: provenance(run.provenance), result: pineResult(run.result, limit), ...(source ? sourceProjection(run.source) : {}) });
         },
         async readWorkspace(args) {
             request(args, []);

@@ -10,6 +10,8 @@ import { LocalPineEngine } from '../scripting/pine-runtime';
 import { loadPineWorkerSource } from '../scripting/worker-source.mjs';
 
 const BASE = Date.UTC(2024, 3, 8);
+// Bounded integration-test budget for fresh SQLite fixtures and real loopback requests.
+const HTTP_TEST_TIMEOUT_MS = 15_000;
 const apps: Awaited<ReturnType<typeof createReplayServer>>[] = [];
 const directories: string[] = [];
 const engines: LocalPineEngine[] = [];
@@ -50,7 +52,7 @@ async function setup(asymmetric = false) {
     return { app, url, primary, secondary, provider, series, advance };
 }
 
-describe('pinned cached contract HTTP gateway', () => {
+describe('pinned cached contract HTTP gateway', { timeout: HTTP_TEST_TIMEOUT_MS }, () => {
     it('serves another cached exact contract without advancing the session or exposing future prices', async () => {
         const ctx = await setup();
         const before = ctx.app.store.sessions();

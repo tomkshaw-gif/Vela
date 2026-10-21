@@ -33,6 +33,10 @@ import { createNodeStatsArtifactJobFactory } from './market-stats/node-job';
 import { eventCalendars } from '@luxalgo/edge-stats/calendar-data';
 import { createHistoryController } from './history';
 import type { HistoryController } from './history-types';
+import { ScenarioLibrary } from './scenarios';
+import type { SaveScenarioInput } from '../shared/scenarios';
+import { compareHistoricalEvents } from './event-comparison';
+import type { EventComparisonRequest } from '../shared/event-comparison';
 
 export { ReplayStore, saveDatabentoKey };
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -91,6 +95,7 @@ export async function createReplayServer(options: ServerOptions = {}) {
     if (options.runtime) validateRuntime(options.runtime);
     const store = new ReplayStore(dataDirectory);
     const scripts = new ScriptLibrary(store.db);
+    const scenarios = new ScenarioLibrary(store.db);
     const deepHistory = new DeepHistoryService(store);
     const sourceEntry = fileURLToPath(import.meta.url).endsWith('.ts');
     let statsJobFactory: ReturnType<typeof createNodeMarketStatsJobFactory> | undefined;
@@ -108,6 +113,7 @@ export async function createReplayServer(options: ServerOptions = {}) {
     try { apiKey = options.apiKey ?? await loadDatabentoKey(dataDirectory); } catch (error) { store.close(); throw error; }
     let history: HistoryController | undefined;
     let historyImportActive = false;
+    let eventComparisonActive = false;
     const token = randomBytes(32).toString('hex');
     const chartAgent = new ChartAgentBroker();
     const provider = new DatabentoProvider(store, () => apiKey, options.fetch);
@@ -160,11 +166,35 @@ export async function createReplayServer(options: ServerOptions = {}) {
             if (method === 'GET' && path === '/api/assistant/clients') { send(response, 200, chartAgent.list()); return; }
             if (method === 'POST' && path === '/api/assistant/exchange') {
                 const input = await body(request, 2_000_000); assertSafeContent(input, apiKey);
-                send(response, 200, chartAgent.exchange(input)); return;
+                send(response, 200, chartAgent.exchange(input, ({ task, context, revision, evidence }) => {
+                    const current = view(store.session(task.target.sessionId));
+                    if (current.session.revision !== revision || current.session.cursor !== context.cursor || current.dataset.id !== context.datasetId
+                        || current.dataset.checksum !== context.datasetChecksum || context.cursor < current.session.config.startIndex
+                        || context.cursor >= (current.session.config.endIndex ?? current.dataset.barCount)) throw new AppError(409, 'The captured scenario replay context changed.', 'CHART_PROPOSAL_CONTEXT');
+                    const cutoff = store.resolveTime(context.datasetId, context.cutoff);
+                    if (cutoff.index !== context.cursor || cutoff.time !== context.cutoff) throw new AppError(409, 'The captured scenario cutoff is not a source candle.', 'CHART_PROPOSAL_CONTEXT');
+                    const seen = new Set<number>();
+                    for (const ref of evidence) {
+                        if (ref.sourceIndex < current.session.config.startIndex || ref.sourceIndex > context.cursor || ref.time > context.cutoff || seen.has(ref.sourceIndex)) throw new AppError(400, 'Scenario evidence must reference distinct revealed source candles.');
+                        const candle = store.resolveTime(context.datasetId, ref.time);
+                        if (candle.index !== ref.sourceIndex || candle.time !== ref.time) throw new AppError(400, 'Scenario evidence index and timestamp must identify the same source candle.');
+                        seen.add(ref.sourceIndex);
+                    }
+                })); return;
             }
             if (method === 'POST' && path === '/api/assistant/call') {
-                const input = await body(request, 70_000); assertSafeContent(input, apiKey);
-                send(response, 200, await chartAgent.call(input)); return;
+                const cancellation = new AbortController();
+                const cancel = (): void => { cancellation.abort(); };
+                const close = (): void => { if (!response.writableEnded) cancel(); };
+                request.once('aborted', cancel); response.once('close', close);
+                try {
+                    const input = await body(request, 70_000); assertSafeContent(input, apiKey);
+                    const result = await chartAgent.call(input, cancellation.signal);
+                    if (!response.destroyed) send(response, 200, result);
+                } catch (error) {
+                    if (!response.destroyed) throw error;
+                } finally { request.off('aborted', cancel); response.off('close', close); }
+                return;
             }
             if (method === 'GET' && path === '/api/bootstrap') { send(response, 200, { token, datasets: store.listDatasets(), sessions: store.sessions(), provider: { configured: !!apiKey }, instruments: INSTRUMENTS, dataDirectory }); return; }
             if (method === 'GET' && path === '/api/datasets') { send(response, 200, store.listDatasets()); return; }
@@ -199,6 +229,53 @@ export async function createReplayServer(options: ServerOptions = {}) {
                 return;
             }
             if (method === 'GET' && path === '/api/market-stats') { send(response, 200, marketStats.catalog()); return; }
+            if (method === 'POST' && path === '/api/market-stats/event-comparison') {
+                if (eventComparisonActive) throw new AppError(409, 'Another event comparison is running.', 'BUSY');
+                if ([...url.searchParams.keys()].length) throw new AppError(400, 'Event comparisons do not accept URL parameters.');
+                const input = requireObject(await body(request, 128 * 1024)); assertSafeContent(input, apiKey);
+                const selected = requireObject(input.request);
+                if (selected.eventCalendar !== 'bundled') throw new AppError(400, 'Explicitly select the bundled event calendars before comparing event sessions.');
+                const dataset = store.dataset(text(selected.datasetId, 'dataset id', 80));
+                // A comparison owns the series of native jobs through their final disposal.
+                if (eventComparisonActive) throw new AppError(409, 'Another event comparison is running.', 'BUSY');
+                eventComparisonActive = true;
+                const controller = new AbortController();
+                const abort = () => controller.abort();
+                const disconnect = () => { if (!response.writableEnded) controller.abort(); };
+                request.once('aborted', abort); response.once('close', disconnect);
+                try {
+                    const result = await compareHistoricalEvents(input as unknown as EventComparisonRequest, {
+                        calendars: eventCalendars, tickSize: dataset.instrument.tickSize,
+                        runQuery: (request, signal) => marketStats.run(request, signal),
+                        readSession: async (request, sessionId, signal) => {
+                            const artifact = await marketStats.artifact(request, { kind: 'session', sessionId, contextBars: 0 }, signal);
+                            if (artifact.kind !== 'session') throw new AppError(500, 'Unexpected event session result.');
+                            const session = artifact.session;
+                            const maximum = artifact.selection.replay?.cursor ?? dataset.barCount - 1;
+                            const rows = store.db.prepare('SELECT time,open,high,low,close,volume,instrument_id,contract FROM bars WHERE dataset_id=? AND idx<=? AND time>=? AND time+60000<=? ORDER BY time LIMIT 5001')
+                                .all(dataset.id, maximum, session.startTs, session.endTs) as unknown as { time: number; open: number; high: number; low: number; close: number; volume: number; instrument_id: string | null; contract: string | null }[];
+                            if (rows.length !== session.bars.length || rows.length > 5000 || rows.some((bar, index) => {
+                                const shown = session.bars[index];
+                                return !shown || shown.ts !== bar.time || shown.open !== bar.open || shown.high !== bar.high
+                                    || shown.low !== bar.low || shown.close !== bar.close || shown.volume !== bar.volume;
+                            })) throw new AppError(400, 'Event session bars do not match the pinned local source.');
+                            const first = rows[0];
+                            if (dataset.continuous && (!first?.contract || !first.instrument_id
+                                || rows.some(bar => bar.contract !== first.contract || bar.instrument_id !== first.instrument_id))) {
+                                throw new AppError(400, 'This event session crosses a raw-contract identity boundary. Choose another event day.');
+                            }
+                            return { ...artifact, contract: { symbol: dataset.continuous ? first!.contract! : dataset.symbol,
+                                instrumentId: dataset.continuous ? first!.instrument_id : null } };
+                        },
+                    }, controller.signal);
+                    if (!response.destroyed) send(response, 200, result);
+                } catch (error) {
+                    if (error instanceof MarketStatsError) throw new AppError(error.code === 'TIMEOUT' ? 408 : error.code === 'ABORTED' ? 499
+                        : error.code === 'BUSY' ? 409 : error.code === 'INVALID_RESULT' || error.code === 'ENGINE_FAILED' ? 500 : 400, error.message, error.code);
+                    throw error;
+                } finally { eventComparisonActive = false; request.off('aborted', abort); response.off('close', disconnect); }
+                return;
+            }
             if (path === '/api/market-stats/presets' || path === '/api/market-stats/preset') {
                 if (method === 'GET' && path.endsWith('/presets')) {
                     if ([...url.searchParams.keys()].some(key => key !== 'events') || url.searchParams.getAll('events').length > 1 || url.searchParams.has('events') && url.searchParams.get('events') !== 'bundled') throw new AppError(400, 'Invalid statistics event calendar.');
@@ -214,8 +291,10 @@ export async function createReplayServer(options: ServerOptions = {}) {
                 return;
             }
             if (method === 'POST' && ['/api/market-stats/query', '/api/market-stats/session', '/api/market-stats/export'].includes(path)) {
+                if (eventComparisonActive) throw new AppError(409, 'An event comparison is using the statistics engine.', 'BUSY');
                 if ([...url.searchParams.keys()].length) throw new AppError(400, 'Statistics queries do not accept URL parameters.');
                 const input = await body(request, 200_000); assertSafeContent(input, apiKey);
+                if (eventComparisonActive) throw new AppError(409, 'An event comparison is using the statistics engine.', 'BUSY');
                 const controller = new AbortController();
                 const abort = () => controller.abort();
                 const disconnect = () => { if (!response.writableEnded) controller.abort(); };
@@ -352,6 +431,34 @@ export async function createReplayServer(options: ServerOptions = {}) {
                     resolvedConfig = { ...remaining, endIndex: store.resolveEndTime(dataset.id, endTime) };
                 }
                 const config = validateSessionConfig(resolvedConfig, dataset.barCount); send(response, 200, view(store.createSession(createSession(config, dataset.instrument)))); return;
+            }
+            const scenarioMatch = /^\/api\/sessions\/([a-f0-9-]{36})\/scenarios(?:\/(context|[a-f0-9-]{36})(?:\/(archive))?)?$/.exec(path);
+            if (scenarioMatch) {
+                const current = view(store.session(scenarioMatch[1]!));
+                const id = scenarioMatch[2], action = scenarioMatch[3];
+                const list = method === 'GET' && id === undefined;
+                if (list) {
+                    if ([...url.searchParams.keys()].some(key => key !== 'includeArchived')
+                        || url.searchParams.getAll('includeArchived').length > 1
+                        || url.searchParams.has('includeArchived') && !['true', 'false'].includes(url.searchParams.get('includeArchived')!)) {
+                        throw new AppError(400, 'Invalid scenario list filter.');
+                    }
+                    send(response, 200, scenarios.list(current, url.searchParams.get('includeArchived') === 'true')); return;
+                }
+                if ([...url.searchParams.keys()].length) throw new AppError(400, 'This scenario operation does not accept query parameters.');
+                if (method === 'GET' && !action) {
+                    send(response, 200, id === 'context' ? scenarios.context(current) : scenarios.get(current, id!)); return;
+                }
+                if (method === 'POST' && id === undefined) {
+                    const input = await body(request, 64 * 1024); assertSafeContent(input, apiKey);
+                    send(response, 200, scenarios.save(view(store.session(scenarioMatch[1]!)), input as SaveScenarioInput)); return;
+                }
+                if (method === 'POST' && id && id !== 'context' && action === 'archive') {
+                    const input = requireObject(await body(request, 1024));
+                    if (Object.keys(input).length !== 1 || !Object.hasOwn(input, 'expectedRevision')) throw new AppError(400, 'Supply only the expected scenario revision.');
+                    send(response, 200, scenarios.archive(view(store.session(scenarioMatch[1]!)), id, integer(input.expectedRevision, 0, Number.MAX_SAFE_INTEGER, 'scenario revision'))); return;
+                }
+                throw new AppError(405, 'Method not allowed.');
             }
             const match = /^\/api\/sessions\/([a-f0-9-]{36})(?:\/(command|clone|chart|series|analytics|monte-carlo|export|navigation))?$/.exec(path);
             if (match) {

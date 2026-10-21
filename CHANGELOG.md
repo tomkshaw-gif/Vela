@@ -6,6 +6,18 @@ All notable changes to Vela, newest first.
 
 ### Added
 
+- **Candle explanations.** Inspect the values and formulas behind a selected
+  candle, with raw prices separated from the chart's displayed prices. Evidence
+  stays tied to the revealed replay clock and can accompany a question to your
+  connected AI.
+- **Historical event comparisons.** Compare up to three matched event-day
+  sessions from a Market Stats result. Overlay their measured price changes,
+  inspect points, ticks and percentages, and retain the calendar and source
+  receipts. Event dates do not imply a release minute or a forecast.
+- **Scenario notebook.** Edit bull and bear hypotheses, trigger levels,
+  invalidation and targets alongside the chart. Review AI proposals as drafts,
+  save explicitly, and preview labelled hypothesis levels. Later-cursor notes
+  stay hidden after replay rewinds.
 - **Market Stats.** Research cached one-minute data from the dashboard with
   setup frequencies, confidence intervals, sample guards and reproducible
   results powered by the open-source Edge Stats engine. Replay scopes include

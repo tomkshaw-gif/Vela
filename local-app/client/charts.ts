@@ -1,4 +1,4 @@
-import { VelaWorkspace, sanitizeState, ensureLayout, type ChartCell, type WorkspaceState } from '../../src/workspace';
+import { VelaWorkspace, sanitizeState, ensureLayout, syncTargets, type ChartCell, type WorkspaceState } from '../../src/workspace';
 import type { Vela, BarRange, SymbolInfo, OHLCV } from '../../src/index';
 import { iconMarkup, registerIcon, registerSidePanel, registerWidgetAction, registerWidgetAttachment, type WidgetContext } from '../../src/plugin';
 import type { Bar, ChartView, SessionView } from '../shared/types';
@@ -32,6 +32,7 @@ import { queueFreshCellAppearance } from './chart-cell-appearance';
 import { createChartQuoteBar } from './chart-quote-bar';
 import './chart-quote-bar.css';
 import { mountDesktopUpdates } from './desktop-updates';
+import { mountResearchWorkbench, type ResearchWorkbench } from './research-workbench';
 
 export { nativeChartConfig } from './chart-appearance';
 
@@ -82,13 +83,14 @@ registerSidePanel({ id: 'local.trade', title: 'Trade', icon: 'local-trade', widt
             off = chart.on('load:start', (market) => refreshSymbol(market.symbol));
         }, destroy: () => { off(); heading.remove(); chromeEvent(ctx, 'trade-unmount'); } };
     } });
-registerSidePanel({ id: 'local.assistant', title: 'AI connection', icon: 'local-assistant', width: 300, resizable: true,
+registerSidePanel({ id: 'local.assistant', title: 'AI connection', icon: 'local-assistant', width: 480, resizable: true,
     mount: (ctx, body) => {
         body.classList.add('local-ai-panel');
         const destroy = mountAiConnection(body, (value) => new Promise((resolve, reject) => {
             ctx.host.dispatchEvent(new CustomEvent('local-replay:ask-ai', { bubbles: true, detail: { value, resolve, reject } }));
         }));
-        return { destroy };
+        queueMicrotask(() => { if (ctx.host.isConnected) chromeEvent(ctx, 'assistant-mount', body); });
+        return { destroy: () => { chromeEvent(ctx, 'assistant-unmount'); destroy(); } };
     } });
 if (!iconMarkup('local-templates')) registerIcon('local-templates', '<svg viewBox="0 0 28 28" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m14 3 11 6-11 6L3 9Zm-11 11 11 6 11-6M3 19l11 6 11-6"/></svg>');
 registerSidePanel({ id: 'local.templates', title: 'Templates', icon: 'local-templates', width: 330, resizable: true,
@@ -125,6 +127,8 @@ export class ReplayCharts {
     private pineEngines = new Map<Vela, LocalPineEngine>();
     private pineFactory: ((chart: Vela) => LocalPineEngine) | null = null;
     private scriptWorkspace: ScriptWorkspace | null = null;
+    private research: ResearchWorkbench | null = null;
+    private researchPreparing = false;
     private validTimeframes = new Map<string, string>();
     private ticketPreview: TicketPriceSelection | null = null;
     private ticketPicking: 'limit' | 'stop' | null = null;
@@ -175,6 +179,7 @@ export class ReplayCharts {
         this.disposers.push(enableScriptPersistence((chart) => this.ensurePineEngine(chart)));
         let templates: ReturnType<typeof mountChartTemplates> | undefined;
         let watchlist: CachedWatchlist | undefined;
+        let assistantHost: HTMLElement | undefined;
         let agent: ChartAgentController | undefined;
         const askAi = (event: Event): void => {
             const detail = (event as CustomEvent<{ value: AnalysisQuestion; resolve(value: unknown): void; reject(error: unknown): void }>).detail;
@@ -186,6 +191,8 @@ export class ReplayCharts {
         this.disposers.push(() => this.host.removeEventListener('local-replay:ask-ai', askAi));
         const panel = (event: Event): void => {
             const detail = (event as CustomEvent<{ kind: string; target?: HTMLElement }>).detail;
+            if (detail.kind === 'assistant-mount' && detail.target) { assistantHost = detail.target; this.research?.attach(detail.target); }
+            if (detail.kind === 'assistant-unmount') { assistantHost = undefined; this.research?.park(); }
             if (detail.kind === 'templates-unmount') { templates?.destroy(); templates = undefined; }
             if (detail.kind === 'templates-mount' && detail.target && this.workspace) {
                 templates?.destroy();
@@ -239,8 +246,8 @@ export class ReplayCharts {
         this.disposers.push(mountReferenceChrome(this.workspace.root));
         this.disposers.push(mountDrawingFavorites(this.workspace));
         this.disposers.push(mountDrawingUtilities(this.workspace));
-        this.disposers.push(this.workspace.on('state:changed', () => this.scheduleSave()));
-        this.disposers.push(this.workspace.on('cell:active', () => this.onActive(this.timeframe)));
+        this.disposers.push(this.workspace.on('state:changed', () => { this.research?.synchronize(); this.scheduleSave(); }));
+        this.disposers.push(this.workspace.on('cell:active', () => { this.research?.synchronize(); this.onActive(this.timeframe); }));
         this.disposers.push(this.workspace.on('cell:created', () => this.watchCells()));
         this.disposers.push(this.workspace.on('cell:destroyed', () => this.watchCells()));
         this.disposers.push(this.workspace.on('layout:changed', ({ layout }) => {
@@ -276,8 +283,19 @@ export class ReplayCharts {
         agent = createChartAgentController({ api: this.api, workspace: this.workspace, appContext, strategy: this.scriptWorkspace,
             session: () => this.view, generation: () => this.generation, cursorTime: () => this.cursorTime,
             blocked: () => this.persistenceSuspended || this.restoring || this.isAgentBlocked(),
-            setTimeframe: (cellId, timeframe, assertCurrent) => this.setTimeframe(timeframe, cellId, assertCurrent), flush: () => this.flush() });
+            setTimeframe: (cellId, timeframe, assertCurrent) => this.setTimeframe(timeframe, cellId, assertCurrent), flush: () => this.flush(),
+            candleEvidence: (input, owner) => this.research ? this.research.readCandle(input, owner) : Promise.reject(new Error('The candle evidence panel is unavailable.')),
+            proposeScenario: (input, owner) => this.research ? this.research.propose(input, owner) : Promise.reject(new Error('The scenario notebook is unavailable.')) });
         this.disposers.push(() => agent?.dispose());
+        if (this.host.ownerDocument && typeof this.workspace.context === 'function') {
+            this.research = mountResearchWorkbench(this.host, { api: this.api, session: () => this.view, cursorTime: () => this.cursorTime,
+                generation: () => this.generation, activeCellId: () => this.workspace?.context().activeCellId ?? null,
+                cell: id => { const cell = this.workspace?.cell(id); return cell ? { chart: cell.chart, bars: this.bars.get(cell.chart.market.timeframe ?? '1') ?? [] } : null; },
+                agent: () => agent ?? null, blocked: () => this.researchPreparing || this.persistenceSuspended || this.restoring || this.isAgentBlocked() || this.writing.size > 0,
+                drawingSync: () => this.workspace?.sync.get('drawings'),
+                pause: () => this.host.dispatchEvent(new CustomEvent('local-replay:chrome', { bubbles: true, detail: { kind: 'pause' } })), flush: () => this.flush() });
+            this.research.synchronize(); if (assistantHost) this.research.attach(assistantHost);
+        }
         if (needsInitialSave) this.scheduleSave();
     }
 
@@ -318,6 +336,7 @@ export class ReplayCharts {
             || view.dataset.checksum !== this.dataView.dataset.checksum || view.session.cursor < this.dataView.session.cursor)) this.bars.clear();
         this.dataView = view;
         this.view = view;
+        this.research?.synchronize();
         const generation = this.generation;
         return this.enqueue(() => this.renderData(view, generation));
     }
@@ -444,8 +463,21 @@ export class ReplayCharts {
             let plotSurface = readPlotSurface();
             const surfaceOff = cell.chart.renderer.onConfigChanged?.(() => {
                 plotSurface = readPlotSurface();
+                this.research?.synchronize();
                 if (current() && cell.host?.nodeType === 1) refreshChartOrderLines(cell.host);
             }) ?? (() => {});
+            const styleOff = cell.chart.on('priceStyle:change', () => {
+                this.research?.synchronize(true);
+                queueMicrotask(() => { if (current()) this.research?.synchronize(); });
+            });
+            const crosshairOff = cell.chart.renderer.onCrosshairMove?.(event => {
+                if (current() && !blocked()) this.research?.capture(cell.id, event);
+            }) ?? (() => {});
+            const draftOff = cell.chart.on('drawing:draft', () => {
+                const workspace = this.workspace; if (!current() || !workspace) return;
+                this.research?.preemptGhost(cell.id, syncTargets(cell.id, workspace.sync.get('drawings'), workspace.cells().map(item => item.id)));
+            });
+            const toolOff = cell.chart.on('drawing:tool', ({ type }) => { if (type && current()) this.research?.preemptGhost(cell.id, []); });
             const lineOff = cell.host?.nodeType === 1 ? bindChartOrderLines(cell.host, {
                 view: () => this.view, current, blocked, preview: () => this.ticketPreview,
                 plotSurface: () => plotSurface,
@@ -470,11 +502,13 @@ export class ReplayCharts {
             const clickOff = typeof cell.chart.renderer.onClick === 'function' ? cell.chart.renderer.onClick(event => {
                 if (this.ticketPicking && event.price !== null && event.paneKind === 'price') {
                     const type = this.ticketPicking; this.ticketPicking = null; selectPrice(event.price, type);
+                    return;
                 }
+                if (current() && !blocked() && event.paneKind === 'price') this.research?.select(cell.id, event.time);
             }) : () => {};
             const loadOff = cell.chart.on('load:start', (market) => this.onNativeMarket(cell, market));
             this.cellWatches.set(cell.id, { chart: cell.chart,
-                refreshQuote, off: () => { quoteOff(); quoteBar?.destroy(); surfaceOff(); lineOff(); clickOff(); loadOff(); } });
+                refreshQuote, off: () => { quoteOff(); quoteBar?.destroy(); surfaceOff(); styleOff(); crosshairOff(); draftOff(); toolOff(); lineOff(); clickOff(); loadOff(); } });
         }
     }
 
@@ -551,8 +585,9 @@ export class ReplayCharts {
 
     /** Pull live drawings and indicator inputs directly, bypassing both debounce timers. */
     async prepareForUpdate(saveLayout = true): Promise<void> {
-        await this.scriptWorkspace?.prepareForUpdate();
-        if (saveLayout) await this.flush();
+        this.researchPreparing = true;
+        try { await this.research?.prepare(); await this.scriptWorkspace?.prepareForUpdate(); if (saveLayout) await this.flush(); }
+        finally { this.researchPreparing = false; }
     }
 
     async flush(): Promise<void> {
@@ -575,6 +610,7 @@ export class ReplayCharts {
         if (this.view && (view.session.id !== this.view.session.id || view.dataset.id !== this.view.dataset.id
             || view.session.revision < this.view.session.revision)) return;
         this.view = view;
+        this.research?.synchronize();
         this.refreshQuoteBars();
         refreshChartOrderLines(this.host);
         if (this.workspace?.root) this.workspace.root.dataset.localLayoutName = view.session.config.name;
@@ -630,6 +666,7 @@ export class ReplayCharts {
     destroy(): void {
         this.generation++;
         this.controller.abort();
+        this.research?.destroy(); this.research = null; this.researchPreparing = false;
         clearTimeout(this.saveTimer);
         this.disposers.splice(0).forEach((dispose) => dispose());
         for (const watch of this.cellWatches.values()) watch.off();

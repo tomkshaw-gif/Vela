@@ -2,6 +2,7 @@ import type { McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 import type { MarketStatsPageResponse, MarketStatsRequest } from './shared/market-stats';
 import type { SessionBarsResult } from '@luxalgo/edge-stats/session-bars';
+import { eventComparisonRequestKey, sameEventComparisonPin, type EventComparisonRequest, type EventComparisonResult } from './shared/event-comparison';
 
 const ports = { desktop: 5196, run: 5197, develop: 5199 } as const;
 export type ResearchMode = keyof typeof ports;
@@ -49,6 +50,7 @@ async function interruptible<T>(work: () => Promise<T>, signal: AbortSignal): Pr
 const modeSchema = z.enum(['desktop', 'run', 'develop']);
 const timestamp = z.number().int().min(0).max(8_640_000_000_000_000);
 const clock = z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/);
+const endClock = z.union([clock, z.literal('24:00')]);
 const date = z.iso.date();
 const label = z.string().min(1).max(200);
 const calendar = z.object({ exchange: label, version: label, sources: z.array(z.string().max(500)).max(20),
@@ -62,7 +64,7 @@ const querySchema = z.object({ dsl: z.string().min(1).max(2000), since: date.opt
 const selection = {
     datasetId: z.uuid(), sourceMode: z.enum(['replay', 'cache']), from: timestamp, until: timestamp,
     replay: z.object({ id: z.uuid(), revision: z.number().int().nonnegative() }).strict().optional(),
-    session: z.object({ key: z.string().min(1).max(64), start: clock, end: clock,
+    session: z.object({ key: z.string().min(1).max(64), start: clock, end: endClock,
         tz: z.string().min(1).max(80).refine(value => { try { new Intl.DateTimeFormat('en', { timeZone: value }); return true; } catch { return false; } }, 'Choose a valid timezone.'),
         overnight: z.boolean() }).strict(),
     calendar: calendar.nullable(),
@@ -93,6 +95,28 @@ const pageSchema = z.object({
 const finite = z.number().finite();
 const count = z.number().int().nonnegative();
 const nullableNumber = finite.nullable();
+const comparisonPin = z.object({ requestKey: z.string().min(1).max(BODY_BYTES), selection: returnedSelection,
+    coverageFingerprint: z.string().min(1).max(128), eventFingerprint: z.string().min(1).max(128) }).strict();
+const comparisonInput = z.object({ request: requestSchema, pin: comparisonPin, calendarEvent: z.string().min(1).max(128),
+    sessionIds: z.array(z.string().min(1).max(240)).min(1).max(3) }).strict()
+    .refine(input => input.request.eventCalendar === 'bundled' && new Set(input.sessionIds).size === input.sessionIds.length
+        && input.pin.requestKey === eventComparisonRequestKey(input.request), 'Choose exact matched sessions and explicit bundled events.');
+const movement = z.object({ points: finite, ticks: nullableNumber, percent: nullableNumber }).strict();
+const comparisonSession = z.object({ sessionId: z.string().min(1).max(240), tradeDate: date, symbol: label, sessionKey: label, tz: label,
+    contract: z.object({ symbol: label, instrumentId: z.string().regex(/^[1-9]\d{0,19}$/).nullable() }).strict().nullable(),
+    isRollDay: z.boolean(), startTs: timestamp, endTs: timestamp, firstBarOpen: timestamp, lastBarClose: timestamp,
+    barCount: z.number().int().min(1).max(5000), tickSize: finite.positive().nullable(),
+    baseline: z.object({ kind: z.literal('first-session-bar-open'), price: finite, time: timestamp, percentAvailable: z.boolean() }).strict(),
+    prices: z.object({ open: finite, close: finite, high: finite, low: finite }).strict(),
+    range: movement, netChange: movement, longMae: movement, longMfe: movement, shortMae: movement, shortMfe: movement,
+    path: z.array(z.object({ time: timestamp, elapsedMinutes: finite.positive(), change: movement }).strict()).min(1).max(5000),
+}).strict();
+const comparisonResult = z.object({ pin: comparisonPin,
+    calendar: z.object({ event: label, version: label, sources: z.array(z.string().max(2000)).max(32),
+        coverage: z.object({ from: date, to: date }).strict(), notes: z.string().max(4000).optional(),
+        fingerprint: z.string().min(1).max(128), timing: z.literal('day-only') }).strict(),
+    sessions: z.array(comparisonSession).min(1).max(3), basis: z.string().min(1).max(4000), disclaimer: z.string().min(1).max(4000),
+}).strict() satisfies z.ZodType<EventComparisonResult>;
 const sessionBar = z.object({ ts: timestamp, open: finite, high: finite, low: finite, close: finite, volume: finite.nonnegative() }).strict()
     .refine(bar => bar.ts % 60_000 === 0 && bar.low <= Math.min(bar.open, bar.close) && bar.high >= Math.max(bar.open, bar.close) && bar.low <= bar.high, 'Invalid session bar.');
 const sessionBarsSchema = z.object({ sessionId: z.string(), symbol: label, sessionKey: label, tradeDate: date, tf: z.literal('1m'), tz: label,
@@ -216,6 +240,41 @@ export class LocalResearchConnection {
         if (page.coverage.revealedUntil !== page.selection.until) throw new ResearchError('The research result does not match the selected source cutoff.');
         return value as MarketStatsPageResponse;
     }
+    async compareEvents(mode: ResearchMode, request: EventComparisonRequest, signal?: AbortSignal): Promise<EventComparisonResult> {
+        const input = parse(comparisonInput, request);
+        sameSelection(input.pin.selection, input.request);
+        const value = parse(comparisonResult, await this.read(mode, '/api/market-stats/event-comparison', input, signal));
+        if (!sameEventComparisonPin(input.pin, value.pin) || value.calendar.event !== input.calendarEvent
+            || value.calendar.coverage.from > value.calendar.coverage.to || value.sessions.length !== input.sessionIds.length) {
+            throw new ResearchError('The event comparison does not match the selected query and calendar.');
+        }
+        for (const [index, session] of value.sessions.entries()) {
+            const first = session.path[0]!, last = session.path.at(-1)!;
+            if (session.sessionId !== input.sessionIds[index] || session.symbol !== input.pin.selection.symbol
+                || session.sessionKey !== input.request.session.key || session.tz !== input.request.session.tz
+                || session.sessionId !== `${session.symbol}|${session.sessionKey}|${session.tradeDate}`
+                || session.tradeDate < value.calendar.coverage.from || session.tradeDate > value.calendar.coverage.to
+                || session.startTs < input.pin.selection.from || session.endTs > input.pin.selection.until
+                || session.endTs <= session.startTs || session.endTs - session.startTs > 36 * 3_600_000
+                || session.firstBarOpen < session.startTs || session.lastBarClose > session.endTs
+                || session.baseline.time !== session.firstBarOpen || session.baseline.price !== session.prices.open
+                || session.baseline.percentAvailable !== (session.prices.open > 0) || session.path.length !== session.barCount
+                || first.time !== session.firstBarOpen + 60_000 || last.time !== session.lastBarClose
+                || session.prices.low > Math.min(session.prices.open, session.prices.close)
+                || session.prices.high < Math.max(session.prices.open, session.prices.close)) {
+                throw new ResearchError('The event comparison contains a mismatched or unrevealed session.');
+            }
+            let previous = session.startTs;
+            for (const point of session.path) {
+                if (point.time <= previous || point.time % 60_000 !== 0 || point.time > session.endTs
+                    || point.elapsedMinutes !== (point.time - session.startTs) / 60_000) {
+                    throw new ResearchError('The event comparison contains an invalid session path.');
+                }
+                previous = point.time;
+            }
+        }
+        return value;
+    }
     async sessionBars(mode: ResearchMode, input: { request: MarketStatsRequest; sessionId: string; contextBars?: number }, signal?: AbortSignal) {
         const body = parse(z.object({ request: requestSchema, sessionId: z.string().min(1).max(240).regex(/^[^\u0000-\u001f\u007f]+$/), contextBars: z.number().int().min(0).max(240).optional() }).strict(), input);
         const value = await this.read(mode, '/api/market-stats/session', body, signal);
@@ -288,6 +347,16 @@ export function registerResearchTools(server: McpServer, connection = new LocalR
         }));
     server.registerTool('vela_edge_session_bars', { description: 'Inspect one exact matched sessionId from an explicit bounded research query. Revalidates the saved replay revision and selected source; does not advance replay. contextBars is capped at 240 and contract-roll context is omitted. Large results fail closed; use a smaller context.', inputSchema: z.object({ mode, request: requestSchema, sessionId: z.string().min(1).max(240).regex(/^[^\u0000-\u001f\u007f]+$/), contextBars: z.number().int().min(0).max(240).optional() }).strict(), annotations },
         async (args, context) => result(async () => ({ ...await connection.sessionBars(args.mode, { request: args.request, sessionId: args.sessionId, contextBars: args.contextBars }, context.mcpReq.signal), mode: args.mode, eventCalendar: args.request.eventCalendar ?? null })));
+    server.registerTool('vela_compare_event_sessions', { description: 'Compare 1–3 exact event-day matches from a prior Edge Stats query and its source/event receipt. Uses minute closes from the first measured session open, explicit points/ticks/percent and descriptive excursions. Calendars supply days, not release times. No probabilities, account P&L, orders or replay advancement. Paths may be sampled with coverage disclosed.',
+        inputSchema: z.object({ mode, comparison: comparisonInput, pathLimit: z.number().int().min(0).max(120).default(60) }).strict(), annotations },
+        async (args, context) => result(async () => {
+            const value = await connection.compareEvents(args.mode, args.comparison, context.mcpReq.signal);
+            return { ...value, mode: args.mode, sessions: value.sessions.map(session => {
+                const count = Math.min(session.path.length, args.pathLimit);
+                const path = Array.from({ length: count }, (_, i) => session.path[count <= 1 ? session.path.length - 1 : Math.round(i * (session.path.length - 1) / (count - 1))]!);
+                return { ...session, path, pathCoverage: { measured: session.path.length, returned: count, sampled: count < session.path.length } };
+            }) };
+        }));
     const page = { limit: z.number().int().min(1).max(100).default(25), offset: z.number().int().min(0).max(1000).default(0) };
     server.registerTool('vela_backtest_sessions', { description: 'List saved manual replay session summaries, including ones that have no open chart. This is global saved-history context, distinct from Pine results and the current replay clock.', inputSchema: z.object({ mode, ...page }).strict(), annotations },
         async (args, context) => result(async () => { const sessions = await connection.sessions(args.mode, context.mcpReq.signal); return { mode: args.mode, basis: 'saved manual replay summaries; not the active replay clock', total: sessions.length, offset: args.offset, sessions: sessions.slice(args.offset, args.offset + args.limit) }; }));

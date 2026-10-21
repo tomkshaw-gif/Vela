@@ -1,0 +1,31 @@
+.candle-evidence {
+    color: inherit;
+    font: inherit;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+.candle-evidence[hidden], .candle-evidence [hidden] { display: none !important; }
+.candle-evidence h2 { margin: 0 0 10px; font-size: 17px; }
+.candle-evidence p { margin: 10px 0; line-height: 1.5; }
+.candle-evidence-pin { font-size: 12px; font-variant-numeric: tabular-nums; }
+.candle-evidence-refs { display: inline-flex; flex-wrap: wrap; gap: 4px; margin-inline-start: 6px; }
+.candle-evidence button { cursor: pointer; font: inherit; }
+.candle-evidence button:disabled { cursor: default; opacity: .6; }
+.candle-evidence-ref { font-size: 11px !important; color: inherit; background: transparent; border: 1px solid currentColor; border-radius: 4px; padding: 2px 4px; }
+.candle-evidence :is(button, summary, section):focus-visible { outline: 2px solid currentColor; outline-offset: 3px; }
+.candle-evidence-facts { width: 100%; border-collapse: collapse; margin-block: 14px; font-size: 12px; }
+.candle-evidence-facts caption { text-align: start; font-weight: 600; margin-block: 6px; }
+.candle-evidence-facts :is(th, td) { text-align: start; vertical-align: top; padding: 7px 4px; border-bottom: 1px solid color-mix(in srgb, currentColor 22%, transparent); }
+.candle-evidence-facts th { font-weight: 500; }
+.candle-evidence-facts td { font-variant-numeric: tabular-nums; }
+.candle-evidence-details { margin-block-start: 16px; }
+.candle-evidence-details summary { cursor: pointer; padding-block: 6px; }
+.candle-evidence-details section { border-top: 1px solid color-mix(in srgb, currentColor 22%, transparent); margin-block-start: 10px; padding-block: 6px; }
+.candle-evidence-details h3 { font-size: 13px; margin: 6px 0; }
+.candle-evidence-details p { font-size: 12px; }
+.candle-evidence-details pre { font-size: 11px; line-height: 1.5; white-space: pre-wrap; max-height: 220px; overflow: auto; }
+.candle-evidence-status { font-size: 12px; }
+@media (max-width: 480px) {
+    .candle-evidence-facts :is(th, td) { padding-inline: 2px; }
+    .candle-evidence-ref { max-width: 100%; overflow-wrap: anywhere; }
+}

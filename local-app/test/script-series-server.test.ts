@@ -9,6 +9,8 @@ import type { Bar, ChartView, Schema, SessionView } from '../shared/types';
 import { DEFAULT_RULES } from '../shared/types';
 
 const START = Date.UTC(2024, 3, 8, 0, 0);
+// Bounded integration-test budget for fresh SQLite fixtures and real loopback requests.
+const HTTP_TEST_TIMEOUT_MS = 15_000;
 const SECRET = 'script-server-fixture-private-key';
 const apps: Awaited<ReturnType<typeof createReplayServer>>[] = [];
 const directories: string[] = [];
@@ -32,7 +34,7 @@ async function setup(source = bars(Array.from({ length: 12 }, (_, i) => START + 
 }
 afterEach(async () => { for (const app of apps.splice(0)) await app.close(); for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true }); });
 
-describe('script and saved strategy HTTP routes', () => {
+describe('script and saved strategy HTTP routes', { timeout: HTTP_TEST_TIMEOUT_MS }, () => {
     it('saves, renames, versions, clones, archives and restores scripts through authenticated routes', async () => {
         const ctx = await setup(); const input = { name: 'Session strategy', source: '//@version=5\nstrategy("NQ")' };
         const createdResponse = await ctx.post('/api/scripts', input); expect(createdResponse.status).toBe(200);
@@ -94,7 +96,7 @@ describe('script and saved strategy HTTP routes', () => {
     });
 });
 
-describe('cached script data gateway', () => {
+describe('cached script data gateway', { timeout: HTTP_TEST_TIMEOUT_MS }, () => {
     it('pins source rows before higher-timeframe aggregation even after the replay advances', async () => {
         const ctx = await setup(); await ctx.advance(2);
         const before = await (await ctx.series('timeframe=5&cursor=1')).json() as ChartView;

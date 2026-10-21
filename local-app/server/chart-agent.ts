@@ -1,6 +1,7 @@
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { AppError } from './errors';
 import { CHART_AGENT_OPERATIONS } from '../shared/chart-agent';
+import { parseScenarioContent, parseScenarioContext, type ScenarioContext, type ScenarioEvidence } from '../shared/scenarios';
 import type {
     ChartAgentCall, ChartAgentClient, ChartAgentCompletion, ChartAgentExchangeInput,
     ChartAgentExchangeResult, ChartAgentOperation, ChartAgentOutcome, ChartAgentTarget, ChartAgentTask,
@@ -121,8 +122,16 @@ function exchange(value: unknown): ChartAgentExchangeInput {
         return { action: 'release', clientId: uuid(input.clientId), clientToken: uuid(input.clientToken) };
     }
     if (input.action === 'heartbeat') {
-        keys(input, ['action', 'clientId', 'clientToken', 'chart']);
-        return { action: 'heartbeat', clientId: uuid(input.clientId), clientToken: uuid(input.clientToken), chart: chart(input.chart) };
+        keys(input, ['action', 'clientId', 'clientToken', 'chart', 'requestId'], ['action', 'clientId', 'clientToken', 'chart']);
+        return { action: 'heartbeat', clientId: uuid(input.clientId), clientToken: uuid(input.clientToken), chart: chart(input.chart),
+            ...(input.requestId === undefined ? {} : { requestId: uuid(input.requestId).toLowerCase() }) };
+    }
+    if (input.action === 'validate_proposal' || input.action === 'commit_proposal') {
+        keys(input, ['action', 'clientId', 'clientToken', 'chart', 'requestId', 'context', 'revision']);
+        let context: ScenarioContext;
+        try { context = parseScenarioContext(input.context); } catch { return invalid(); }
+        return { action: input.action, clientId: uuid(input.clientId), clientToken: uuid(input.clientToken), chart: chart(input.chart),
+            requestId: uuid(input.requestId).toLowerCase(), context, revision: generation(input.revision) };
     }
     if (input.action !== 'poll') invalid();
     keys(input, ['action', 'clientId', 'clientToken', 'chart', 'completion'], ['action', 'clientId', 'clientToken', 'chart']);
@@ -143,7 +152,10 @@ interface Receipt {
     outcome: ChartAgentOutcome;
     token?: string;
     acceptsCompletion: boolean;
+    proposal?: { context: ScenarioContext; revision: number; granted: boolean };
 }
+
+export type ValidateChartProposal = (input: { task: ChartAgentTask; context: ScenarioContext; revision: number; evidence: ScenarioEvidence[] }) => void;
 
 function sameTarget(one: ChartAgentTarget, two: ChartAgentTarget): boolean {
     return one.clientId === two.clientId && one.sessionId === two.sessionId && one.generation === two.generation && one.cellId === two.cellId;
@@ -169,7 +181,7 @@ export class ChartAgentBroker {
         return [...this.clients.values()].map(lease => structuredClone(lease.chart));
     }
 
-    exchange(value: unknown): ChartAgentExchangeResult {
+    exchange(value: unknown, validateProposal?: ValidateChartProposal): ChartAgentExchangeResult {
         this.ensureOpen();
         const input = exchange(value);
         this.prune();
@@ -180,13 +192,35 @@ export class ChartAgentBroker {
             if (!sameChart(existing.chart, input.clientId, input.chart)) throw new AppError(409, 'The chart heartbeat registration is no longer current.', 'CHART_TARGET_CHANGED');
             existing.expiresAt = this.now() + LEASE_MS;
             this.schedule();
-            return { request: null };
+            const pending = input.requestId === undefined ? undefined : this.pending.get(input.requestId);
+            return { request: null, ...(input.requestId === undefined ? {} : { operation: { requestId: input.requestId,
+                active: !!pending && pending.delivered && pending.task.target.clientId === input.clientId } }) };
+        }
+        if (input.action === 'validate_proposal' || input.action === 'commit_proposal') {
+            const pending = this.pending.get(input.requestId), receipt = this.receipts.get(input.requestId);
+            if (!existing || !sameChart(existing.chart, input.clientId, input.chart) || !pending?.delivered || pending.task.operation !== 'propose_scenario'
+                || pending.task.target.clientId !== input.clientId || !receipt || receipt.proposal?.granted || !validateProposal) {
+                throw new AppError(409, 'The scenario proposal no longer has commit authority.', 'CHART_PROPOSAL_CANCELLED');
+            }
+            this.assertTarget(pending.task.target, existing.chart);
+            if (input.context.sessionId !== input.chart.sessionId || input.context.cutoff !== input.chart.cursorTime) throw new AppError(409, 'The scenario proposal context changed.', 'CHART_PROPOSAL_CONTEXT');
+            const pin = { context: input.context, revision: input.revision, granted: false };
+            if (receipt.proposal && (receipt.proposal.revision !== input.revision || JSON.stringify(receipt.proposal.context) !== JSON.stringify(input.context))) throw new AppError(409, 'The scenario proposal context changed.', 'CHART_PROPOSAL_CONTEXT');
+            if (input.action === 'commit_proposal' && !receipt.proposal) throw new AppError(409, 'Validate the scenario proposal before committing its draft.', 'CHART_PROPOSAL_NOT_VALIDATED');
+            let content;
+            try { content = parseScenarioContent(pending.task.args.content); } catch { return invalid(); }
+            validateProposal({ task: structuredClone(pending.task), context: { ...input.context }, revision: input.revision, evidence: content.evidence });
+            receipt.proposal = pin;
+            // The synchronous authority grant is the commit boundary; later cancellation cannot promise rollback.
+            if (input.action === 'commit_proposal') receipt.proposal.granted = true;
+            return { request: null, proposal: { requestId: input.requestId, authorized: true } };
         }
         if (input.action === 'release') {
             this.removeClient(input.clientId, new AppError(409, 'The chart window disconnected.', 'CHART_CLIENT_DISCONNECTED'));
             this.schedule();
             return { request: null };
         }
+        if (input.action !== 'poll') return invalid();
         if (!existing && input.completion) {
             const receipt = this.receipts.get(input.completion.requestId);
             if (!receipt?.acceptsCompletion || receipt.outcome.dispatchedAt === undefined || receipt.outcome.target.clientId !== input.clientId) throw new AppError(409, 'Register the chart window before completing a request.', 'CHART_CLIENT_NOT_REGISTERED');
@@ -217,9 +251,10 @@ export class ChartAgentBroker {
         return { request: queued ? structuredClone(queued.task) : null };
     }
 
-    call(value: unknown): Promise<unknown> {
+    call(value: unknown, signal?: AbortSignal): Promise<unknown> {
         try {
             this.ensureOpen();
+            if (signal?.aborted) throw new AppError(409, 'The chart caller cancelled this request.', 'CHART_CALL_CANCELLED');
             const input = call(value);
             this.prune();
             if (input.operation === 'read_operation') return Promise.resolve(this.readOperation(input));
@@ -243,8 +278,17 @@ export class ChartAgentBroker {
                 throw error;
             }
             const result = new Promise<unknown>((resolve, reject) => this.pending.set(task.requestId, { task, delivered: false, resolve, reject }));
+            const cancel = (): void => {
+                const pending = this.pending.get(task.requestId);
+                // Existing chart edits retain their delivery/save/receipt lifecycle after a caller disconnects.
+                if (pending && (task.operation === 'propose_scenario' || task.operation === 'read_candle_evidence')) {
+                    this.finish(pending, new AppError(409, 'The chart caller cancelled this request.', 'CHART_CALL_CANCELLED'));
+                }
+            };
+            signal?.addEventListener('abort', cancel, { once: true });
+            if (signal?.aborted) cancel();
             this.schedule();
-            return result;
+            return result.finally(() => signal?.removeEventListener('abort', cancel));
         } catch (error) { return Promise.reject(error); }
     }
 
@@ -254,6 +298,7 @@ export class ChartAgentBroker {
         if (!receipt?.acceptsCompletion || receipt.outcome.dispatchedAt === undefined || receipt.outcome.target.clientId !== clientId) throw new AppError(409, 'The chart request is no longer pending.', 'CHART_REQUEST_CHANGED');
         if (!receipt.token || !timingSafeEqual(Buffer.from(receipt.token), Buffer.from(clientToken))) throw new AppError(403, 'The chart window token does not match.', 'CHART_CLIENT_TOKEN');
         this.assertTarget(receipt.outcome.target, { clientId, ...registered });
+        if (response.success && receipt.outcome.operation === 'propose_scenario' && !receipt.proposal?.granted) throw new AppError(409, 'The proposal has no server commit authority.', 'CHART_PROPOSAL_NOT_AUTHORIZED');
         const result = response.success ? json(response.value, receipt.outcome.operation === 'screenshot' ? SCREENSHOT_BYTES : RESULT_BYTES) : undefined;
         receipt.acceptsCompletion = false;
         receipt.outcome.state = response.success ? 'completed' : 'failed';
@@ -298,7 +343,8 @@ export class ChartAgentBroker {
         if (receipt) {
             receipt.outcome.state = pending.delivered ? 'unknown' : 'not_dispatched';
             receipt.outcome.updatedAt = this.now(); receipt.outcome.error = message;
-            receipt.acceptsCompletion = pending.delivered && ['CHART_REQUEST_TIMEOUT', 'CHART_CLIENT_EXPIRED', 'CHART_CLIENT_DISCONNECTED'].includes(error.code);
+            receipt.acceptsCompletion = pending.delivered && (['CHART_REQUEST_TIMEOUT', 'CHART_CLIENT_EXPIRED', 'CHART_CLIENT_DISCONNECTED'].includes(error.code)
+                || error.code === 'CHART_CALL_CANCELLED' && (pending.task.operation !== 'propose_scenario' || receipt.proposal?.granted === true));
         }
         pending.reject(new AppError(error.status, message, error.code));
     }

@@ -1,0 +1,11 @@
+.local-research-workbench { border-top: 1px solid var(--vela-border, #d4d7df); margin-top: 18px; padding-top: 12px; }
+.local-research-workbench[hidden], .local-research-workbench [hidden] { display: none !important; }
+.local-research-workbench .research-tabs { display: flex; gap: 6px; margin-bottom: 12px; }
+.local-research-workbench .research-tabs button[aria-pressed=true] { border-color: var(--vela-accent, #467ce5); font-weight: 600; }
+.local-research-workbench .research-status { font-size: 12px; overflow-wrap: anywhere; }
+.local-research-workbench .research-preview { border: 1px solid var(--vela-border, #d4d7df); padding: 10px; border-radius: 5px; margin-bottom: 12px; }
+.local-ai-panel .scenario-notebook { --text: var(--vela-fg, #243047); --muted: var(--vela-fg, #536078); --panel: var(--vela-bg, #fff); --input: var(--vela-bg, #fff); --border: var(--vela-border, #d4d7df); }
+.local-ai-panel .scenario-notebook label { display: grid; margin: 0; }
+.local-ai-panel .scenario-notebook button { margin: 0; }
+.local-ai-panel .scenario-notebook p { margin: 0 0 10px; }
+.local-ai-panel .scenario-notebook h3 { margin: 0 0 8px; }

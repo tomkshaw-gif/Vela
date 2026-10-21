@@ -365,3 +365,32 @@ from the MCP request to the HTTP request and isolated computation. Read-only
 research tools cannot place orders, advance replay, fetch provider data, execute
 a shell, select arbitrary destinations or write arbitrary paths. Existing chart
 edits continue to require their exact workspace target and generation.
+
+### Evidence and scenario workbench
+
+`vela_read_candle_evidence` reads a pinned chart cell's selected candle. Raw
+source bars and actual displayed OHLCV are separate inputs; transformed candles
+must not be reconstructed from an incomplete loaded window. Every statement
+links to its inputs, formula and sample count. Unsupported transformations,
+mixed-contract windows and stale scopes fail closed. Numeric candle facts do
+not establish a news cause or forecast.
+
+`vela_compare_event_sessions` revalidates the exact query and event/source
+receipt before comparing one to three matched session IDs. Context candles are
+excluded. Minute-close paths use the first measured session open; directional
+high/low excursions do not establish intrabar ordering or account P&L. Event
+calendars supply dates, not release times. MCP path sampling is disclosed and
+does not change the full-session descriptive metrics.
+
+`vela_propose_scenario` installs an editable local draft only. It does not save
+the library, preview chart drawings or execute orders. The user chooses Save
+and Preview separately. An authenticated server grant immediately precedes the
+synchronous local draft change. Cancellation received before that grant rejects
+the proposal; cancellation after a grant cannot promise rollback. A lost reply
+can leave an unknown outcome that must be inspected before repeating it.
+Scenario records use their own revisions and verify
+captured dataset checksums and revealed candle evidence. Saves retain a cursor
+watermark, so later edits of an older scenario are unavailable after rewind.
+Local drafts preserve unsaved work; preparation drains explicit saves and
+blocks on unresolved persistence failures. Scenario JSON export is separate
+from the existing session clone and backup formats.

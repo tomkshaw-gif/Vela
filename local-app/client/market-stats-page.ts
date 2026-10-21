@@ -9,6 +9,9 @@ import './date-time-picker.css';
 import type { getStatsPresetCatalog, BuiltStatsPreset } from '../server/stats-presets';
 import type { StatsArtifactResponse } from '../server/market-stats/artifacts';
 import { mountStatsSessionChart, type StatsSessionChart } from './stats-session-chart';
+import { eventCalendars } from '@luxalgo/edge-stats/calendar-data';
+import { mountEventComparison } from './event-comparison';
+import type { EventComparisonResult } from '../shared/event-comparison';
 
 type PresetCatalog = ReturnType<typeof getStatsPresetCatalog>;
 type Preset = PresetCatalog['presets'][number];
@@ -57,10 +60,12 @@ export function mountMarketStatsPage(host: HTMLElement, api: LocalApi, callbacks
       <details class="ms-query-help"><summary>Available outcomes and conditions</summary><div class="ms-registry"></div></details>
       <div class="ms-run"><button data-stats-run type="submit" disabled>Run statistics</button><button data-stats-cancel type="button" hidden>Cancel</button><button data-stats-refresh type="button">Refresh sources</button></div>
       <p class="ms-muted">Only complete sessions are counted. Estimates are withheld below 10 samples; fewer than 30 carry a low-sample warning.</p></section></form>
-      <section class="ms-results" tabindex="-1" aria-label="Market statistics result" hidden></section></main></div>`;
+      <section class="ms-results" tabindex="-1" aria-label="Market statistics result" hidden></section>
+      <section class="ms-event-comparison" hidden></section></main></div>`;
     const query = <T extends Element>(selector: string) => host.querySelector<T>(selector)!;
     const form = query<HTMLFormElement>('form'); const status = query<HTMLElement>('.ms-status');
     const resultHost = query<HTMLElement>('.ms-results'); const runButton = query<HTMLButtonElement>('[data-stats-run]');
+    const comparisonHost = query<HTMLElement>('.ms-event-comparison');
     const cancelButton = query<HTMLButtonElement>('[data-stats-cancel]');
     const input = (name: string) => form.elements.namedItem(name) as HTMLInputElement;
     const select = (name: string) => form.elements.namedItem(name) as HTMLSelectElement;
@@ -68,16 +73,27 @@ export function mountMarketStatsPage(host: HTMLElement, api: LocalApi, callbacks
     const presetStatus = query<HTMLElement>('.ms-preset-status');
     let presets: PresetCatalog | null = null, selectedPreset = '', presetGeneration = 0, composeGeneration = 0, artifactGeneration = 0;
     let presetController: AbortController | null = null, composeController: AbortController | null = null, artifactController: AbortController | null = null;
-    let latestRequest: MarketStatsRequest | null = null, inspectionIndex = -1, artifactBusy = false;
+    let latestRequest: MarketStatsRequest | null = null, inspectionIndex = -1, artifactBusy = false, comparisonBusy = false;
     let sessionChart: StatsSessionChart | null = null;
     let catalog: MarketStatsCatalog | null = null; let controller: AbortController | null = null; let loadController: AbortController | null = null;
     let disposed = false, loading = false, preparing = false, generation = 0; let loadGeneration = 0; let latest: MarketStatsPageResponse | null = null;
-    const pending = new Set<Promise<void>>();
-    function track(work: Promise<void>): Promise<void> {
+    const pending = new Set<Promise<unknown>>();
+    let preparation: Promise<void> | null = null;
+    function track<T>(work: Promise<T>): Promise<T> {
         pending.add(work);
         void work.then(() => pending.delete(work), () => pending.delete(work));
         return work;
     }
+    const comparison = mountEventComparison(comparisonHost, {
+        async compare(request, signal) {
+            if (disposed || preparing || comparisonBusy || artifactBusy || controller || !latestRequest || latestRequest.eventCalendar !== 'bundled') {
+                throw new Error('Wait for the current statistics operation or run a query with the explicit bundled event calendar.');
+            }
+            comparisonBusy = true; busy(false); artifactButtons();
+            try { return await track(api.post<EventComparisonResult>('/api/market-stats/event-comparison', request, signal)); }
+            finally { comparisonBusy = false; if (!disposed) { busy(!!controller); artifactButtons(); } }
+        },
+    });
     const preset = (): Preset | undefined => presets?.presets.find(item => item.id === selectedPreset);
     function composeEnabled(): void {
         const button = host.querySelector<HTMLButtonElement>('[data-preset-compose]');
@@ -85,10 +101,10 @@ export function mountMarketStatsPage(host: HTMLElement, api: LocalApi, callbacks
     }
     function stopCompose(): void { composeGeneration++; if (composeController) { composeController.abort(); presetStatus.textContent = 'Composition cancelled. Current query draft preserved.'; } composeController = null; composeEnabled(); }
     function artifactButtons(): void {
-        for (const button of resultHost.querySelectorAll<HTMLButtonElement>('[data-stats-download],[data-session-index]')) button.disabled = preparing || artifactBusy || !latestRequest;
+        for (const button of resultHost.querySelectorAll<HTMLButtonElement>('[data-stats-download],[data-session-index]')) button.disabled = disposed || preparing || artifactBusy || comparisonBusy || !latestRequest;
         const previous = resultHost.querySelector<HTMLButtonElement>('[data-session-prev]'), next = resultHost.querySelector<HTMLButtonElement>('[data-session-next]');
-        if (previous) previous.disabled = disposed || preparing || artifactBusy || inspectionIndex <= 0;
-        if (next) next.disabled = disposed || preparing || artifactBusy || inspectionIndex < 0 || inspectionIndex >= (latest?.result.sessions.length ?? 0) - 1;
+        if (previous) previous.disabled = disposed || preparing || artifactBusy || comparisonBusy || inspectionIndex <= 0;
+        if (next) next.disabled = disposed || preparing || artifactBusy || comparisonBusy || inspectionIndex < 0 || inspectionIndex >= (latest?.result.sessions.length ?? 0) - 1;
         const cancel = resultHost.querySelector<HTMLButtonElement>('[data-artifact-cancel]'); if (cancel) cancel.hidden = !artifactBusy;
     }
     function stopArtifact(): void {
@@ -186,9 +202,10 @@ export function mountMarketStatsPage(host: HTMLElement, api: LocalApi, callbacks
         const range = bounds(); if (!range) return { start: 0, end: 0, endInclusive: false };
         return { start: range.start + (input.name === 'until' ? 60_000 : 0), end: range.end, endInclusive: input.name === 'until' };
     } });
-    function busy(value: boolean): void { runButton.disabled = disposed || preparing || loading || value || !bounds() || source()?.schema !== 'ohlcv-1m' || source()?.intervalMs !== 60_000;
+    function busy(value: boolean): void { runButton.disabled = disposed || preparing || loading || value || comparisonBusy || !bounds() || source()?.schema !== 'ohlcv-1m' || source()?.intervalMs !== 60_000;
         cancelButton.hidden = !value; form.setAttribute('aria-busy', String(value)); }
-    function cancel(): void { generation++; if (controller) { controller.abort(); status.textContent = 'Statistics cancelled.'; } controller = null; stopCompose(); stopArtifact(); busy(false); }
+    function cancel(): void { generation++; if (controller) { controller.abort(); status.textContent = 'Statistics cancelled.'; } controller = null;
+        comparison.update(null); comparisonHost.hidden = true; stopCompose(); stopArtifact(); busy(false); }
     function invalidate(): void { cancel(); latest = null; latestRequest = null; inspectionIndex = -1; resultHost.hidden = true; }
     function sourceInfo(resetDates = false): void {
         const dataset = source(); const replay = select('sourceMode').value === 'replay'; query<HTMLElement>('.ms-replay').hidden = !replay;
@@ -259,7 +276,7 @@ export function mountMarketStatsPage(host: HTMLElement, api: LocalApi, callbacks
         try { link.click(); } finally { setTimeout(() => URL.revokeObjectURL(url), 0); }
     }
     async function artifact(kind: 'session' | 'csv' | 'parquet', index = inspectionIndex): Promise<void> {
-        if (disposed || preparing || artifactBusy || !latest || !latestRequest) return;
+        if (disposed || preparing || artifactBusy || comparisonBusy || !latest || !latestRequest) return;
         const owner = latest, request = structuredClone(latestRequest);
         const match = owner.result.sessions[index]; if (kind === 'session' && !match) return;
         const context = Number(resultHost.querySelector<HTMLInputElement>('[data-session-context]')?.value ?? 30);
@@ -323,7 +340,10 @@ export function mountMarketStatsPage(host: HTMLElement, api: LocalApi, callbacks
         try {
             const response = await api.post<MarketStatsPageResponse>('/api/market-stats/query', payload, abort.signal);
             if (disposed || request !== generation) return;
-            latestRequest = structuredClone(payload); render(response); status.textContent = 'Statistics complete. The sample count and source coverage are shown below.';
+            latestRequest = structuredClone(payload); render(response);
+            comparison.update(payload.eventCalendar === 'bundled' ? { request: payload, result: response, calendars: eventCalendars } : null);
+            comparisonHost.hidden = payload.eventCalendar !== 'bundled';
+            status.textContent = 'Statistics complete. The sample count and source coverage are shown below.';
         } catch (error) {
             if (!disposed && request === generation) status.textContent = abort.signal.aborted ? 'Statistics cancelled.' : error instanceof Error ? error.message : 'Statistics could not be computed.';
         } finally { if (!disposed && request === generation) { controller = null; busy(false); } }
@@ -369,14 +389,20 @@ export function mountMarketStatsPage(host: HTMLElement, api: LocalApi, callbacks
         }
     };
     const onSubmit = (event: SubmitEvent): void => { void track(submit(event)); };
-    async function prepare(): Promise<void> {
+    function prepare(): Promise<void> {
+        if (preparation) return preparation;
         preparing = true; loadGeneration++; presetGeneration++; presetController?.abort(); presetController = null; loadController?.abort(); loadController = null; loading = false; cancel();
-        try { await Promise.allSettled([...pending]); }
-        finally { preparing = false; busy(false); composeEnabled(); artifactButtons(); }
+        track(comparison.prepareToLeave());
+        preparation = (async () => {
+            try { while (pending.size) await Promise.allSettled([...pending]); }
+            finally { preparing = false; preparation = null; busy(false); composeEnabled(); artifactButtons(); }
+        })();
+        return preparation;
     }
     const contextChanged = (event: Event): void => { if ((event.target as Element).matches('[data-session-context]')) void track(artifact('session')); };
     host.addEventListener('change', contextChanged);
     form.addEventListener('submit', onSubmit); form.addEventListener('input', change); form.addEventListener('change', change); host.addEventListener('click', click);
     void refresh();
-    return { refresh, cancel, prepare, destroy(): void { if (disposed) return; disposed = true; loadGeneration++; presetGeneration++; presetController?.abort(); presetController = null; loadController?.abort(); loadController = null; cancel(); pickers.destroy(); removeUpdates(); form.removeEventListener('submit', onSubmit); form.removeEventListener('input', change); form.removeEventListener('change', change); host.removeEventListener('change', contextChanged); host.removeEventListener('click', click); host.replaceChildren(); } };
+    return { refresh, cancel, prepare, destroy(): void { if (disposed) return; disposed = true; loadGeneration++; presetGeneration++; presetController?.abort(); presetController = null; loadController?.abort(); loadController = null; cancel();
+        track(comparison.destroy()); pickers.destroy(); removeUpdates(); form.removeEventListener('submit', onSubmit); form.removeEventListener('input', change); form.removeEventListener('change', change); host.removeEventListener('change', contextChanged); host.removeEventListener('click', click); host.replaceChildren(); } };
 }

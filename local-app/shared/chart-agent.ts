@@ -1,3 +1,5 @@
+import type { ScenarioContext } from './scenarios';
+
 export const CHART_AGENT_OPERATIONS = [
     'read_chart', 'read_candles', 'set_timeframe', 'list_drawing_tools',
     'add_drawing', 'update_drawing', 'remove_drawing', 'list_indicators',
@@ -6,6 +8,7 @@ export const CHART_AGENT_OPERATIONS = [
     'capture_analysis_scope', 'read_analysis_scope', 'evaluate_analysis', 'read_analysis_job', 'cancel_analysis_job',
     'read_session', 'list_scripts', 'read_script', 'list_backtests', 'read_backtest', 'read_workspace', 'list_templates', 'read_current_result',
     'read_analysis_request',
+    'read_candle_evidence', 'propose_scenario',
     'backtest_indicator', 'read_backtest_job', 'cancel_backtest_job',
 ] as const;
 
@@ -73,9 +76,21 @@ export type ChartAgentExchangeInput =
         clientId: string;
         clientToken: string;
         chart: Omit<ChartAgentClient, 'clientId'>;
+        requestId?: string;
+    }
+    | {
+        action: 'validate_proposal' | 'commit_proposal';
+        clientId: string;
+        clientToken: string;
+        chart: Omit<ChartAgentClient, 'clientId'>;
+        requestId: string;
+        context: ScenarioContext;
+        revision: number;
     }
     | { action: 'release'; clientId: string; clientToken: string };
 
 export interface ChartAgentExchangeResult {
     request: ChartAgentTask | null;
+    operation?: { requestId: string; active: boolean };
+    proposal?: { requestId: string; authorized: true };
 }

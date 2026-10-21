@@ -1,0 +1,24 @@
+.scenario-notebook { color: var(--text, #d9e0ec); background: var(--panel, #151c29); padding: 14px; border: 1px solid var(--border, #303b4f); border-radius: 10px; font-size: 13px; }
+.scenario-notebook[hidden], .scenario-notebook [hidden] { display: none !important; }
+.scenario-notebook h3 { margin: 0 0 8px; font-size: 16px; }
+.scenario-notice { color: var(--muted, #a7b3c8); font-size: 12px; line-height: 1.5; }
+.scenario-toolbar { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0; }
+.scenario-notebook button, .scenario-notebook select, .scenario-notebook input, .scenario-notebook textarea { font: inherit; color: inherit; background: var(--input, #101724); border: 1px solid var(--border, #43516a); border-radius: 5px; padding: 7px 9px; min-width: 0; }
+.scenario-notebook button { cursor: pointer; }
+.scenario-notebook button:disabled { opacity: .5; cursor: default; }
+.scenario-notebook button:focus-visible, .scenario-notebook select:focus-visible, .scenario-notebook input:focus-visible, .scenario-notebook textarea:focus-visible { outline: 2px solid #8ab4ff; outline-offset: 2px; }
+.scenario-notebook select { max-width: 100%; }
+.scenario-provenance { overflow-wrap: anywhere; color: var(--muted, #a7b3c8); font-size: 11px; line-height: 1.6; }
+.scenario-form { display: grid; gap: 12px; }
+.scenario-form label { display: grid; gap: 5px; font-size: 12px; line-height: 1.4; }
+.scenario-form textarea { min-height: 72px; resize: vertical; width: 100%; box-sizing: border-box; }
+.scenario-form input { width: 100%; box-sizing: border-box; }
+.scenario-cases { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr)); gap: 10px; }
+.scenario-case { display: grid; gap: 10px; min-width: 0; padding: 12px; border: 1px solid var(--border, #43516a); border-radius: 7px; }
+.scenario-case legend { padding: 0 6px; font-weight: 600; }
+.scenario-bull legend { color: #7cddba; }
+.scenario-bear legend { color: #f3acb7; }
+.scenario-evidence-row { border-top: 1px solid var(--border, #303b4f); padding: 8px 0; display: grid; gap: 7px; }
+.scenario-evidence-row p { margin: 0; font-size: 11px; color: var(--muted, #a7b3c8); }
+.scenario-evidence-row button { justify-self: start; }
+.scenario-status { line-height: 1.5; min-height: 1.5em; color: var(--muted, #c0cce0); }

@@ -4,7 +4,7 @@ import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { LocalResearchConnection } from '../mcp-research';
 import { createChartMcp } from '../mcp';
-import type { MarketStatsRequest } from '../shared/market-stats';
+import type { MarketStatsRequest, MarketStatsPageResponse } from '../shared/market-stats';
 import { buildPreset, getStatsPresetCatalog } from '../server/stats-presets';
 import { analytics, createSession } from '../engine/index';
 import { DEFAULT_RULES } from '../shared/types';
@@ -13,13 +13,14 @@ import { mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createReplayServer } from '../server/index';
+import { describeEventSession, pinEventComparison, type EventComparisonResult, type EventComparisonRequest } from '../shared/event-comparison';
 
 const DATASET = '11111111-1111-4111-8111-111111111111';
 const REPLAY = '22222222-2222-4222-8222-222222222222';
 const START = Date.UTC(2024, 3, 8);
 const MATCH = 'NQM4|regular|2024-04-08';
 const names = ['vela_research_apps', 'vela_edge_sources', 'vela_edge_fields', 'vela_edge_presets',
-    'vela_edge_query', 'vela_edge_report', 'vela_edge_session_bars', 'vela_backtest_sessions', 'vela_backtest_statistics'];
+    'vela_edge_query', 'vela_edge_report', 'vela_edge_session_bars', 'vela_compare_event_sessions', 'vela_backtest_sessions', 'vela_backtest_statistics'];
 function request(): MarketStatsRequest {
     return { datasetId: DATASET, sourceMode: 'cache', from: START, until: START + 60_000 * 60,
         session: { key: 'regular', start: '09:30', end: '16:00', tz: 'America/New_York', overnight: false },
@@ -90,7 +91,7 @@ describe('typed local research MCP', () => {
         try {
             const value = await ctx.request('tools/list', {});
             const list = (value.result as { tools: { name: string; annotations: { readOnlyHint: boolean; openWorldHint: boolean } }[] }).tools;
-            expect(list).toHaveLength(47);
+            expect(list).toHaveLength(50);
             expect(list.filter(tool => names.includes(tool.name)).map(tool => tool.name)).toEqual(names);
             expect(list.filter(tool => names.includes(tool.name)).every(tool => tool.annotations.readOnlyHint && !tool.annotations.openWorldHint)).toBe(true);
             expect(list.every(tool => !/order|provider|export|shell|credential/.test(tool.name))).toBe(true);
@@ -204,6 +205,46 @@ describe('typed local research MCP', () => {
             expect(await ctx.call('vela_edge_session_bars', { mode: 'run', request: base, sessionId: MATCH, contextBars: 241 })).toHaveProperty('result.isError', true);
             expect(await ctx.call('vela_backtest_statistics', { mode: 'run', sessionId: REPLAY, curveLimit: 1001 })).toHaveProperty('result.isError', true);
             expect(remote).not.toHaveBeenCalled();
+        } finally { await ctx.close(); }
+    });
+    it('accepts a full-day end clock through MCP while keeping starts and other end clocks strict', async () => {
+        const sent: MarketStatsRequest[] = [];
+        const remote = vi.fn<typeof fetch>(async (url, init) => {
+            if (String(url).endsWith('/api/bootstrap')) return Response.json({ token: 'a'.repeat(64) });
+            const input = JSON.parse(String(init?.body)) as MarketStatsRequest;
+            sent.push(input); return Response.json(page(input));
+        });
+        const ctx = await rpc(new LocalResearchConnection(remote));
+        const input = { ...request(), session: { key: 'day', start: '00:00', end: '24:00', tz: 'UTC', overnight: false } };
+        try {
+            output(await ctx.call('vela_edge_query', { mode: 'run', request: input }));
+            expect(sent).toHaveLength(1); expect(sent[0]!.session).toEqual(input.session);
+            for (const session of [{ ...input.session, start: '24:00' }, { ...input.session, end: '24:01' }, { ...input.session, end: '25:00' }]) {
+                expect(await ctx.call('vela_edge_query', { mode: 'run', request: { ...input, session } })).toHaveProperty('result.isError', true);
+            }
+            expect(sent).toHaveLength(1);
+        } finally { await ctx.close(); }
+    });
+    it('compares exact event receipts through MCP and discloses sampled paths without changing metrics', async () => {
+        const requestWithEvents: MarketStatsRequest = { ...request(), eventCalendar: 'bundled' };
+        const comparison: EventComparisonRequest = { request: requestWithEvents,
+            pin: { ...pinEventComparison(requestWithEvents, page(requestWithEvents) as unknown as MarketStatsPageResponse), eventFingerprint: 'event-fingerprint' },
+            calendarEvent: 'CPI', sessionIds: [MATCH] };
+        const s = sessionBars(); s.context = { kind: 'none', note: 'No context', bars: [] };
+        const value: EventComparisonResult = { pin: comparison.pin, calendar: { event: 'CPI', version: '1', sources: [],
+            coverage: { from: '2024-01-01', to: '2024-12-31' }, fingerprint: 'calendar-fingerprint', timing: 'day-only' },
+            sessions: [describeEventSession(s, { tickSize: 0.25, revealedUntil: s.endTs })],
+            basis: 'First measured session open', disclaimer: 'Descriptive day-only comparison' };
+        const remote = vi.fn<typeof fetch>(async url => Response.json(String(url).endsWith('/api/bootstrap') ? { token: 'a'.repeat(64) } : value));
+        const ctx = await rpc(new LocalResearchConnection(remote));
+        try {
+            const report = output(await ctx.call('vela_compare_event_sessions', { mode: 'run', comparison, pathLimit: 0 })) as EventComparisonResult;
+            expect(report.pin).toEqual(comparison.pin); expect(report.sessions[0]!.netChange).toEqual(value.sessions[0]!.netChange);
+            expect(report.sessions[0]!.path).toEqual([]);
+            expect(report.sessions[0]).toHaveProperty('pathCoverage', { measured: 1, returned: 0, sampled: true });
+            expect(remote.mock.calls.map(([url]) => new URL(String(url)).pathname)).toEqual(['/api/bootstrap', '/api/market-stats/event-comparison']);
+            value.pin = { ...value.pin, eventFingerprint: 'changed' };
+            expect(await ctx.call('vela_compare_event_sessions', { mode: 'run', comparison })).toHaveProperty('result.isError', true);
         } finally { await ctx.close(); }
     });
     it('bounds serialized request bodies before bootstrap, including structurally valid calendar data', async () => {
@@ -332,6 +373,11 @@ describe('typed local research MCP', () => {
         if (['vela_edge_query', 'vela_edge_session_bars'].includes(name)) args.request = base;
         if (name === 'vela_edge_report') { args.request = source; args.preset = { id: 'synthetic' }; }
         if (name === 'vela_edge_session_bars') args.sessionId = MATCH;
+        if (name === 'vela_compare_event_sessions') {
+            const input: MarketStatsRequest = { ...base, eventCalendar: 'bundled' };
+            args.comparison = { request: input, pin: { ...pinEventComparison(input, page(input) as unknown as MarketStatsPageResponse),
+                eventFingerprint: 'event-fingerprint' }, calendarEvent: 'CPI', sessionIds: [MATCH] };
+        }
         if (name === 'vela_backtest_statistics') args.sessionId = REPLAY;
         try {
             void ctx.call(name, args);
@@ -450,6 +496,24 @@ describe('typed local research MCP', () => {
             expect(output(await ctx.call('vela_edge_report', { mode: 'develop', request: source, preset: { id: preset.id } }))).toMatchObject({ preset: { id: preset.id }, selection: { datasetId: dataset.id } });
             const ledger = output(await ctx.call('vela_backtest_statistics', { mode: 'develop', sessionId: session.id }));
             expect(ledger).toMatchObject({ statistics: { trades: 0, netPnl: 0, winRate: null, avgR: null }, equityCoverage: { retained: 0, returned: 0 } });
+            const day = app.store.addDataset({ name: 'Synthetic full UTC day', symbol: 'NQM4', schema: 'ohlcv-1m', source: 'csv',
+                bars: Array.from({ length: 1440 }, (_, index) => ({ ...bars[0]!, time: START + index * 60_000 })) });
+            const fullDay: MarketStatsRequest = { ...input, datasetId: day.id, from: day.start, until: day.end,
+                session: { key: 'full', start: '00:00', end: '24:00', tz: 'UTC', overnight: false } };
+            expect(output(await ctx.call('vela_edge_query', { mode: 'develop', request: fullDay }))).toMatchObject({
+                selection: { datasetId: day.id, checksum: day.checksum }, result: { n: 1, estimate: null, guards: { refused: true } },
+            });
+            const cpiStart = Date.UTC(2024, 3, 10);
+            const cpi = app.store.addDataset({ name: 'Synthetic covered event', symbol: 'NQM4', schema: 'ohlcv-1m', source: 'csv',
+                bars: bars.map((bar, i) => ({ ...bar, time: cpiStart + i * 60_000 })) });
+            const cpiInput: MarketStatsRequest = { ...input, datasetId: cpi.id, from: cpi.start, until: cpi.end, eventCalendar: 'bundled' };
+            const cpiPage = output(await ctx.call('vela_edge_query', { mode: 'develop', request: cpiInput })) as MarketStatsPageResponse;
+            const compared = output(await ctx.call('vela_compare_event_sessions', { mode: 'develop', comparison: {
+                request: cpiInput, pin: pinEventComparison(cpiInput, cpiPage), calendarEvent: 'CPI', sessionIds: [cpiPage.result.sessions[0]!.sessionId],
+            }, pathLimit: 2 })) as EventComparisonResult;
+            expect(compared).toMatchObject({ calendar: { event: 'CPI', timing: 'day-only' }, sessions: [{ barCount: 10,
+                netChange: { points: 0.5, ticks: 2, percent: 0.5 }, pathCoverage: { measured: 10, returned: 2, sampled: true } }] });
+            expect(compared.sessions[0]!.path.map(point => point.elapsedMinutes)).toEqual([1, 10]);
             expect(JSON.stringify(app.store.session(session.id))).toBe(before);
             expect(provider).not.toHaveBeenCalled(); expect(ctx.chart.call).not.toHaveBeenCalled(); expect(ctx.chart.clients).not.toHaveBeenCalled();
         } finally {

@@ -230,7 +230,10 @@ describe('live chart assistant controller', () => {
         const bar = (time: number) => ({ time, open: 1, high: 1, low: 1, close: 1, volume: 1 });
         f.api.get.mockResolvedValueOnce({ bars: [bar(START), bar(START + 10 * 60000)], cursorTime: START + 9 * 60000, intervalMs: 300000, hasMore: true } as never);
         const result = await f.controller.execute(f.task('read_candles', { timeframe: '5', limit: 50 }));
-        expect(f.api.get.mock.calls[0]?.[0]).toBe(`/api/sessions/${SESSION_ID}/chart?timeframe=5m&limit=50`);
+        const query = new URL(f.api.get.mock.calls[0]![0], 'http://local');
+        expect(query.pathname).toBe(`/api/sessions/${SESSION_ID}/chart`);
+        expect(Object.fromEntries(query.searchParams)).toEqual({ timeframe: '5m', limit: '50', snapshot: JSON.stringify({
+            cursor: f.view().session.cursor, revision: f.view().session.revision, datasetId: f.view().dataset.id, checksum: f.view().dataset.checksum }) });
         expect(result).toMatchObject({ timeframe: '5', intervalMs: 300000, hasMore: true, bars: [bar(START)] });
         expect(f.chart.market.timeframe).toBe('1');
         await expect(f.controller.execute(f.task('read_candles', { timeframe: '1S' }))).rejects.toThrow('not supported');

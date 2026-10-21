@@ -7,17 +7,27 @@ import type { ChartAgentClient, ChartAgentCompletion, ChartAgentExchangeInput, C
 import type { ChartView, SessionView } from '../shared/types';
 import { ApiError, type LocalApi } from './api';
 import { markTransientScript } from './script-persistence';
-import { parseTimeframe, timeframeSupported, toServerTimeframe } from '../shared/timeframes';
+import { parseTimeframe, timeframeBucket, timeframeSupported, toServerTimeframe } from '../shared/timeframes';
 import { createChartAnalysis } from './chart-analysis';
 import type { AppAgentContext } from './app-agent-context';
 import type { ScriptWorkspace } from './script-workspace';
-import { sameTarget } from '../shared/chart-analysis';
+import { sameTarget, type AnalysisScopeSummary } from '../shared/chart-analysis';
+import { replaySnapshot } from './chart-data';
+import type { CandleEvidence } from '../shared/candle-evidence';
+import { parseScenarioContent, parseScenarioContext, type ScenarioContent, type ScenarioContext } from '../shared/scenarios';
 
 const JSON_LIMIT = 256 * 1024;
 const SCREENSHOT_LIMIT = 1.5 * 1024 * 1024;
 const MAX_TIME = 4_102_444_800_000;
 const PRIVATE_FIELD = /^(?:__proto__|constructor|prototype|api[_-]?key|authorization|cookie|password|secret|token|credentials?)$/i;
 const SCRIPT_JOB_MS = 30_000;
+
+export interface ResearchOwner {
+    signal: AbortSignal;
+    assertCurrent(): void;
+    /** Await immediately around the synchronous local draft mutation, after all other awaited work. */
+    commitDraft?: (change: () => boolean) => Promise<boolean>;
+}
 
 export interface ChartAgentControllerOptions {
     api: Pick<LocalApi, 'get' | 'post' | 'postKeepalive'>;
@@ -32,13 +42,16 @@ export interface ChartAgentControllerOptions {
     autoStart?: boolean;
     appContext?: AppAgentContext;
     strategy?: Pick<ScriptWorkspace, 'startBacktestForIndicator' | 'cancelBacktest'>;
+    candleEvidence?: (input: { cellId: string; selectedTime?: number; scope: AnalysisScopeSummary }, owner: ResearchOwner) => Promise<CandleEvidence>;
+    /** Local draft only. Check owner immediately before committing; do not save, preview, draw or place orders. */
+    proposeScenario?: (input: { cellId: string; content: ScenarioContent; context: ScenarioContext }, owner: ResearchOwner) => Promise<{ draftOnly: true; context: ScenarioContext }>;
 }
 
 export interface ChartAgentController {
     readonly clientId: string;
     poll(): Promise<void>;
-    execute(task: ChartAgentTask): Promise<unknown>;
-    requestAnalysis(question: string, args?: Record<string, unknown>): Promise<unknown>;
+    execute(task: ChartAgentTask, signal?: AbortSignal): Promise<unknown>;
+    requestAnalysis(question: string, args?: Record<string, unknown>, owner?: ResearchOwner): Promise<unknown>;
     dispose(): void;
 }
 
@@ -295,6 +308,24 @@ export function createChartAgentController(options: ChartAgentControllerOptions)
         return { view, chart: cell.chart };
     };
 
+    const pinResearch = (task: ChartAgentTask, chart: Vela, view: SessionView, owner?: ResearchOwner) => {
+        const snapshot = replaySnapshot(view);
+        const identity = (value: SessionView): string => JSON.stringify([value.dataset.symbol, value.dataset.schema, value.dataset.intervalMs]);
+        const dataset = identity(view); const cutoff = options.cursorTime?.();
+        const resolution = chart.market.timeframe; const symbol = chart.market.symbol;
+        const priceStyle = chart.renderer?.get?.('priceStyle') ?? 'candles';
+        const check = (allowExpired = false): void => {
+            owner?.signal.throwIfAborted(); owner?.assertCurrent();
+            const current = guard(task, chart, allowExpired).view;
+            if (replaySnapshot(current) !== snapshot || identity(current) !== dataset || options.cursorTime?.() !== cutoff
+                || chart.market.timeframe !== resolution || chart.market.symbol !== symbol || (chart.renderer?.get?.('priceStyle') ?? 'candles') !== priceStyle) {
+                throw new Error('The captured replay scope changed. Capture the intended region again.');
+            }
+        };
+        return { check, cutoff, resolution, priceStyle,
+            view: { ...view, session: { ...view.session }, dataset: { ...view.dataset, instrument: { ...view.dataset.instrument } } } };
+    };
+
     const persist = async (task: ChartAgentTask, chart: Vela, value: unknown): Promise<unknown> => {
         guard(task, chart);
         try { await options.flush(); }
@@ -374,7 +405,8 @@ export function createChartAgentController(options: ChartAgentControllerOptions)
         } finally { clearTimeout(timeout); abort.signal.removeEventListener('abort', cancel); }
     };
 
-    const perform = async (task: ChartAgentTask): Promise<unknown> => {
+    const perform = async (task: ChartAgentTask, externalOwner?: ResearchOwner): Promise<unknown> => {
+        externalOwner?.signal.throwIfAborted(); externalOwner?.assertCurrent();
         const { view, chart } = guard(task);
         const args = record(task.args, 'Chart arguments');
         if (task.operation === 'list_drawing_tools') {
@@ -439,16 +471,84 @@ export function createChartAgentController(options: ChartAgentControllerOptions)
                 return { request: { ...analysisRequest, scope }, note: 'A question queued locally by the chart user. Your external AI host performs analysis; this app has not started a model request.' };
             }
             case 'capture_analysis_scope': {
-                const cursor = view.session.cursor; const cutoff = options.cursorTime?.(); const resolution = chart.market.timeframe;
+                const pin = pinResearch(task, chart, view, externalOwner); const cutoff = pin.cutoff;
                 if (cutoff === undefined || cutoff === null) throw new Error('Reveal a replay bar before capturing an analysis scope.');
-                const assertCurrent = (): void => {
-                    const current = guard(task, chart, true).view;
-                    if (current.session.cursor !== cursor || options.cursorTime?.() !== cutoff || chart.market.timeframe !== resolution
-                        || current.dataset.id !== view.dataset.id || current.dataset.checksum !== view.dataset.checksum || current.session.revision !== view.session.revision) {
-                        throw new Error('The captured replay scope changed. Capture the intended region again.');
+                return request(signal => analysis.capture({ target: task.target, chart, view: pin.view, cutoff, assertCurrent: () => pin.check(true), signal }, args), task.deadline, externalOwner?.signal, true);
+            }
+            case 'read_candle_evidence': {
+                keys(args, ['selectedTime']);
+                if (!options.candleEvidence) throw new Error('The candle evidence connection is unavailable.');
+                const pin = pinResearch(task, chart, view, externalOwner);
+                const rawStyles = ['candles', 'bars', 'line', 'area', 'baseline'];
+                const expectedTransform = pin.priceStyle === 'heikinashi' ? 'heikinashi' : rawStyles.includes(String(pin.priceStyle)) ? 'none' : undefined;
+                if (expectedTransform === undefined) throw new Error('Candle evidence requires a known time-preserving raw style or Heikin Ashi.');
+                const cutoff = integer(pin.cutoff, 'Loaded replay cutoff', 0, MAX_TIME);
+                const period = parseTimeframe(pin.resolution!)!;
+                const selectedTime = args.selectedTime === undefined ? undefined : integer(args.selectedTime, 'Selected candle time', 0, MAX_TIME);
+                const selected = selectedTime ?? timeframeBucket(cutoff, period);
+                if (selected < 0 || selected > cutoff || timeframeBucket(selected, period) !== selected) throw new Error('Select an exact revealed candle-open timestamp.');
+                return request(async signal => {
+                    const owner: ResearchOwner = { signal, assertCurrent: () => { signal.throwIfAborted(); pin.check(); } };
+                    owner.assertCurrent();
+                    const scope = await analysis.capture({ target: task.target, chart, view: pin.view, cutoff, assertCurrent: () => pin.check(true), signal }, { from: selected, to: cutoff });
+                    owner.assertCurrent();
+                    if (scope.clock.sourceCutoff !== cutoff) throw new Error('Candle evidence scope differs from the loaded historical clock.');
+                    const value = await options.candleEvidence!({ cellId: task.target.cellId!, ...(selectedTime === undefined ? {} : { selectedTime }), scope: structuredClone(scope) }, owner);
+                    owner.assertCurrent();
+                    const resultScope = value?.scope;
+                    if (value?.version !== 1 || !resultScope || resultScope.scopeId !== scope.scopeId || !sameTarget(resultScope.target, scope.target)
+                        || resultScope.cursorTime !== scope.cursorTime || JSON.stringify(resultScope.dataset) !== JSON.stringify(scope.dataset)
+                        || JSON.stringify(resultScope.clock) !== JSON.stringify(scope.clock) || JSON.stringify(resultScope.region) !== JSON.stringify(scope.region)
+                        || resultScope.chart.timeframe !== scope.chart.timeframe || resultScope.chart.intervalMs !== scope.chart.intervalMs
+                        || resultScope.chart.symbol !== scope.chart.symbol
+                        || value.selectedTime !== selected || value.raw?.time !== selected || value.displayed?.time !== selected
+                        || value.transform?.kind !== expectedTransform || value.causes?.status !== 'unavailable') {
+                        throw new Error('Candle evidence does not match its pinned scope, selection or raw/displayed basis.');
                     }
-                };
-                return request(signal => analysis.capture({ target: task.target, chart, view, cutoff, assertCurrent, signal }, args), task.deadline, undefined, true);
+                    return bounded(structuredClone(value));
+                }, task.deadline, externalOwner?.signal, true);
+            }
+            case 'propose_scenario': {
+                keys(args, ['content']);
+                const content = parseScenarioContent(args.content);
+                if (!options.proposeScenario) throw new Error('The scenario notebook connection is unavailable.');
+                const pin = pinResearch(task, chart, view, externalOwner);
+                const cutoff = integer(pin.cutoff, 'Loaded replay cutoff', 0, MAX_TIME);
+                const context = parseScenarioContext({ sessionId: pin.view.session.id, datasetId: pin.view.dataset.id,
+                    datasetChecksum: pin.view.dataset.checksum, cursor: pin.view.session.cursor, cutoff });
+                if (content.evidence.some(item => item.sourceIndex > context.cursor || item.time > cutoff || item.time < pin.view.dataset.start)) throw new Error('Scenario evidence must refer to revealed source candles.');
+                const invalidation = new AbortController();
+                return request(async signal => {
+                    const owner: ResearchOwner = { signal, assertCurrent: () => { signal.throwIfAborted(); pin.check(); } };
+                    const authorize = async (action: 'validate_proposal' | 'commit_proposal'): Promise<void> => {
+                        owner.assertCurrent(); const current = advertise();
+                        if (!current) throw new Error('The proposal chart is no longer available.');
+                        const reply = await options.api.post<ChartAgentExchangeResult>('/api/assistant/exchange', {
+                            action, clientId, clientToken, chart: current, requestId: task.requestId, context, revision: pin.view.session.revision,
+                        } satisfies ChartAgentExchangeInput, signal);
+                        owner.assertCurrent();
+                        if (reply.proposal?.requestId !== task.requestId || reply.proposal.authorized !== true) throw new Error('The proposal did not receive commit authority.');
+                    };
+                    owner.assertCurrent();
+                    await authorize('validate_proposal');
+                    let attempted = false, committed = false;
+                    owner.commitDraft = async change => {
+                        owner.assertCurrent();
+                        if (attempted) throw new Error('The proposal draft commit has already been attempted.');
+                        attempted = true;
+                        try {
+                            await authorize('commit_proposal'); owner.assertCurrent();
+                            const result = change();
+                            if (typeof result !== 'boolean') throw new Error('The local draft commit must return synchronously.');
+                            committed = result; return result;
+                        } catch (error) { invalidation.abort(); throw error; }
+                    };
+                    const result = await options.proposeScenario!({ cellId: task.target.cellId!, content, context: { ...context } }, owner);
+                    owner.assertCurrent();
+                    if (result?.draftOnly !== true || JSON.stringify(parseScenarioContext(result.context)) !== JSON.stringify(context)) throw new Error('Scenario proposal returned a different context or was not draft-only.');
+                    if (!committed) throw new Error('Scenario proposals must retain their local draft through owner.commitDraft.');
+                    return bounded({ draftOnly: true, context });
+                }, task.deadline, externalOwner ? AbortSignal.any([externalOwner.signal, invalidation.signal]) : invalidation.signal, true);
             }
             case 'read_analysis_scope': keys(args, ['scopeId']); return analysis.readScope(task.target, text(args.scopeId, 'Scope ID'));
             case 'evaluate_analysis': {
@@ -482,7 +582,9 @@ export function createChartAgentController(options: ChartAgentControllerOptions)
                 const range = requestedRange(args);
                 const resolution = timeframe(args.timeframe ?? chart.market.timeframe, view);
                 const limit = args.limit === undefined ? 200 : integer(args.limit, 'Candle limit', 1, 1000);
-                const query = new URLSearchParams({ timeframe: toServerTimeframe(resolution), limit: String(limit) });
+                const snapshot = replaySnapshot(view);
+                const chartTimeframe = chart.market.timeframe;
+                const query = new URLSearchParams({ timeframe: toServerTimeframe(resolution), limit: String(limit), snapshot });
                 const cursor = view.session.cursor;
                 const loadedCursorTime = options.cursorTime?.();
                 const ranged = range.from !== undefined || range.to !== undefined;
@@ -494,6 +596,9 @@ export function createChartAgentController(options: ChartAgentControllerOptions)
                 const result = await request((signal) => options.api.get<ChartView>(`/api/sessions/${encodeURIComponent(view.session.id)}/${ranged ? 'series' : 'chart'}?${query}`, signal), task.deadline);
                 const current = guard(task, chart).view;
                 if (current.session.cursor !== cursor) throw new Error('Replay advanced during the candle request. Read the chart again.');
+                if (replaySnapshot(current) !== snapshot || options.cursorTime?.() !== loadedCursorTime || chart.market.timeframe !== chartTimeframe) {
+                    throw new Error('The replay dataset, session revision, loaded clock or chart timeframe changed during the candle request. Read the chart again.');
+                }
                 if (loadedCursorTime !== undefined && result.cursorTime !== loadedCursorTime) throw new Error('The saved replay cursor differs from the loaded chart. Refresh the session before reading candles.');
                 const cutoff = result.cursorTime;
                 return bounded({ timeframe: resolution, cursorTime: cutoff, intervalMs: result.intervalMs,
@@ -673,11 +778,13 @@ export function createChartAgentController(options: ChartAgentControllerOptions)
         }
     };
 
-    const execute = (task: ChartAgentTask): Promise<unknown> => {
-        const next = execution.catch(() => undefined).then(() => perform(task));
+    const executeOwned = (task: ChartAgentTask, owner?: ResearchOwner): Promise<unknown> => {
+        const next = execution.catch(() => undefined).then(() => perform(task, owner));
         execution = next;
         return next;
     };
+    const execute = (task: ChartAgentTask, signal?: AbortSignal): Promise<unknown> => executeOwned(task,
+        signal ? { signal, assertCurrent: () => signal.throwIfAborted() } : undefined);
 
     const advertise = (): Omit<ChartAgentClient, 'clientId'> | null => {
         const view = options.session();
@@ -689,7 +796,7 @@ export function createChartAgentController(options: ChartAgentControllerOptions)
             timeframe: cells.find((cell) => cell.id === activeId)?.timeframe ?? cells[0]!.timeframe, cells, cursorTime: options.cursorTime?.() ?? null };
     };
 
-    const heartbeat = (registered: Omit<ChartAgentClient, 'clientId'>): (() => void) => {
+    const heartbeat = (registered: Omit<ChartAgentClient, 'clientId'>, active?: { task: ChartAgentTask; cancellation: AbortController }): (() => void) => {
         const cancellation = new AbortController();
         const cells = options.workspace.cells().map(cell => ({ id: cell.id, chart: cell.chart }));
         let heartbeatTimer: ReturnType<typeof setTimeout> | undefined;
@@ -706,10 +813,13 @@ export function createChartAgentController(options: ChartAgentControllerOptions)
         };
         const renew = async (): Promise<void> => {
             if (stopped || !current()) { stop(); return; }
-            const body: ChartAgentExchangeInput = { action: 'heartbeat', clientId, clientToken, chart: registered };
+            const body: ChartAgentExchangeInput = { action: 'heartbeat', clientId, clientToken, chart: registered,
+                ...(active ? { requestId: active.task.requestId } : {}) };
             try {
-                await request(signal => options.api.post<ChartAgentExchangeResult>('/api/assistant/exchange', body, signal), Date.now() + 1500, cancellation.signal);
+                const reply = await request(signal => options.api.post<ChartAgentExchangeResult>('/api/assistant/exchange', body, signal), Date.now() + 1500, cancellation.signal);
+                if (active && (reply.operation?.requestId !== active.task.requestId || !reply.operation.active)) { active.cancellation.abort(); stop(); return; }
             } catch (error) {
+                if (active) { active.cancellation.abort(); stop(); return; }
                 if (error instanceof ApiError && [403, 409, 503].includes(error.status)) { stop(); return; }
             }
             if (!stopped && current()) heartbeatTimer = setTimeout(() => { void renew(); }, 2000);
@@ -733,9 +843,14 @@ export function createChartAgentController(options: ChartAgentControllerOptions)
                 completion = undefined; lastError = '';
                 if (disposed || !result.request) return;
                 const task = result.request;
-                const stopHeartbeat = heartbeat(chart);
-                try { completion = { requestId: task.requestId, success: true, value: await execute(task) }; }
-                catch (error) { completion = { requestId: task.requestId, success: false, error: (error instanceof Error ? error.message : 'Chart operation failed.').slice(0, 2000) }; }
+                const cancellation = new AbortController();
+                const research = task.operation === 'propose_scenario' || task.operation === 'read_candle_evidence';
+                const stopHeartbeat = heartbeat(chart, research ? { task, cancellation } : undefined);
+                try {
+                    const value = await execute(task, research ? cancellation.signal : undefined);
+                    if (!cancellation.signal.aborted) completion = { requestId: task.requestId, success: true, value };
+                }
+                catch (error) { if (!cancellation.signal.aborted) completion = { requestId: task.requestId, success: false, error: (error instanceof Error ? error.message : 'Chart operation failed.').slice(0, 2000) }; }
                 finally { stopHeartbeat(); }
             } catch (error) {
                 if (error instanceof ApiError && [400, 403, 409, 413, 422].includes(error.status)) {
@@ -756,14 +871,18 @@ export function createChartAgentController(options: ChartAgentControllerOptions)
 
     if (options.autoStart !== false) timer = setTimeout(() => { void poll(); }, 0);
     return { clientId, poll, execute,
-        requestAnalysis: async (question, args = {}) => {
+        requestAnalysis: async (question, args = {}, owner) => {
+            owner?.signal.throwIfAborted(); owner?.assertCurrent();
             const value = text(question, 'Analysis question', 2000).trim();
             if (!value) throw new Error('Enter a question about the chart.');
             const current = advertise();
             if (!current) throw new Error('Open a replay chart first.');
             const cellId = options.workspace.context().activeCellId;
             const target = { clientId, sessionId: current.sessionId, generation: current.generation, cellId };
-            const scope = await execute({ operation: 'capture_analysis_scope', target, args, requestId: crypto.randomUUID(), deadline: Date.now() + 10000 }) as { scopeId: string };
+            const task: ChartAgentTask = { operation: 'capture_analysis_scope', target, args, requestId: crypto.randomUUID(), deadline: Date.now() + 10000 };
+            const scope = await executeOwned(task, owner) as AnalysisScopeSummary;
+            analysis.readScope(target, scope.scopeId);
+            guard(task); owner?.signal.throwIfAborted(); owner?.assertCurrent();
             analysisRequest = { question: value, scopeId: scope.scopeId, target, createdAt: Date.now() };
             return { ...analysisRequest, instruction: 'Use vela_workspaces to find this exact target, then vela_read_analysis_request to inspect the queued question and its pinned region.' };
         },
