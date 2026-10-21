@@ -29,6 +29,60 @@ Chart draft edits do not create orders. Successful submission retires the matchi
 draft without discarding a newer edit. Projected bracket P&L is gross price
 distance times quantity and point value, not an additional fee calculation.
 
+Partial exits use whole futures contracts. `{type:'close', qty?}` keeps its
+next-source-bar eligibility, cancels working orders and caps the executed close
+to the surviving position. Omitting `qty` captures the current position quantity.
+Percentages are a UI selection aid converted once to explicit integer contracts;
+the engine does not store or repeatedly apply percentages.
+
+`OrderDraft` and `Position` may carry `takeProfits: TakeProfitLeg[]`, where each
+leg is `{id, price, qty}`. A bracket has at most ten legs with unique owner-local
+IDs, tick-aligned prices and positive whole-contract quantities whose sum does
+not exceed its quantity. An empty list is valid. `takeProfit` remains the legacy
+all-remaining target; a scalar and a leg list cannot coexist, even an empty list.
+`amend.takeProfits` replaces the whole list, `null` removes it, and omission
+preserves it. Switching target authorities requires explicitly clearing the old
+one in the same amendment. Leg IDs survive price/quantity amendments and are
+copied to target exit fills and trades as `takeProfitLegId`.
+
+Targets exit only existing inventory. Touched legs execute nearest first, with
+list order breaking equal-price ties, and each exit consumes its leg before
+reconciling the remainder. Every reduction, including an ordinary opposite-side
+fill or manual close, trims excess allocations farthest first; later list entries
+are trimmed first at equal prices. Trimming happens on execution, never when a
+close is queued. A configured stop protects all actual remaining contracts and
+does not reserve a separate additive quantity. Each partial exit remains one
+closed `Trade` for accounting and analytics.
+
+Same-side additions preserve existing legs and append explicit new legs. The
+merged list must meet the same limits; collisions and scalar/list scale-in
+conflicts are rejected at admission. Unbracketed additions retain the bracket.
+An ordinary order that purely reduces or flattens current exposure cannot carry
+`takeProfits`, including an empty target list. Legacy scalar SL/TP fields remain
+accepted on reducing orders and are ignored on the reducing fill; they do not
+replace the surviving position's exits. A reversing order's target quantities
+must fit only its newly opened residual exposure. These conditions
+are checked again at execution; a queued order that no longer fits is rejected
+before filling or charging fees. Explicitly amend the position bracket instead
+of attaching target legs to a reducing order.
+
+Existing gap/risk and stop-first ordering also applies to target legs. Opening
+gap targets precede queued discretionary orders; favorable gaps may improve each
+limit-bounded execution. Intrabar stops precede targets on ambiguous bars, and
+remaining inventory continues through target, excursion and prop-risk checks.
+Triggered entries use their trigger reference, never the earlier source-bar open
+as an exit gap. Adding or amending targets never inspects unrevealed OHLC or fills
+on an already revealed bar. Weighted cost basis, fee rounding and proportional
+risk/MAE/MFE allocation are unchanged.
+
+`Session.executionVersion?: 2` is set on first use of the target-list contract and
+retained after targets are removed or filled. Legacy-only sessions omit it.
+`validateExecutionVersion(input: unknown): 1 | 2` in `engine/validation.ts` rejects
+unknown markers and requires marker `2` whenever an order/position has a
+`takeProfits` field (including an empty list) or a fill/trade has
+`takeProfitLegId`. Stored-session validation preserves and validates these fields;
+an unmarked legacy session cannot silently carry newer execution data.
+
 ## Pure engine exports (`engine/index.ts`)
 
 - `createSession(config: SessionConfig, instrument: Instrument, id?: string): Session`

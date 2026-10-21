@@ -1,6 +1,6 @@
-import type { Bar, Instrument, OrderDraft, PropRules, Session, SessionConfig } from '../shared/types';
+import type { Bar, Instrument, OrderDraft, PropRules, Session, SessionConfig, TakeProfitLeg } from '../shared/types';
 
-export const LIMITS = { orders: 20000, fills: 40000, trades: 20000, curve: 10000, days: 10000, bookmarks: 1000, contracts: 1000 };
+export const LIMITS = { orders: 20000, fills: 40000, trades: 20000, curve: 10000, days: 10000, bookmarks: 1000, contracts: 1000, takeProfits: 10 };
 export const money = (n: number): number => Math.round((n + Math.sign(n) * Number.EPSILON) * 100) / 100;
 export const object = (v: unknown, label: string): Record<string, unknown> => {
     if (!v || typeof v !== 'object' || Array.isArray(v)) throw new Error(`${label} must be an object`);
@@ -92,12 +92,35 @@ export function validateDraft(v: unknown, instrument: Instrument, reference?: nu
     else if (x.price !== undefined) throw new Error('Market orders do not have a price');
     if (x.stopLoss !== undefined) draft.stopLoss = tickPrice(x.stopLoss, instrument, 'Stop loss');
     if (x.takeProfit !== undefined) draft.takeProfit = tickPrice(x.takeProfit, instrument, 'Take profit');
+    if (x.takeProfits !== undefined) {
+        if (x.takeProfit !== undefined) throw new Error('Scalar take profit and target legs cannot be combined');
+        draft.takeProfits = validateTakeProfits(x.takeProfits, instrument, draft.qty);
+    }
+    const targets = [draft.takeProfit, ...(draft.takeProfits ?? []).map(leg => leg.price)].filter((price): price is number => price !== undefined);
     const entry = draft.price ?? reference;
     if (entry !== undefined) {
         if (draft.stopLoss !== undefined && (side === 'buy' ? draft.stopLoss >= entry : draft.stopLoss <= entry)) throw new Error('Stop loss must be beyond the entry on the loss side');
-        if (draft.takeProfit !== undefined && (side === 'buy' ? draft.takeProfit <= entry : draft.takeProfit >= entry)) throw new Error('Take profit must be beyond the entry on the profit side');
-    } else if (draft.stopLoss !== undefined && draft.takeProfit !== undefined && (side === 'buy' ? draft.stopLoss >= draft.takeProfit : draft.stopLoss <= draft.takeProfit)) throw new Error('Bracket prices are reversed');
+        if (targets.some(price => side === 'buy' ? price <= entry : price >= entry)) throw new Error('Take profit must be beyond the entry on the profit side');
+    } else if (draft.stopLoss !== undefined && targets.some(price => side === 'buy' ? draft.stopLoss! >= price : draft.stopLoss! <= price)) throw new Error('Bracket prices are reversed');
     return draft;
+}
+export function validateTakeProfits(value: unknown, instrument: Instrument, ownerQty: number): TakeProfitLeg[] {
+    const legs = list(value, 'Take profit targets', LIMITS.takeProfits).map(value => {
+        const leg = object(value, 'Take profit target');
+        return { id: id(leg.id, 'Take profit target ID'), price: tickPrice(leg.price, instrument, 'Take profit target price'), qty: integer(leg.qty, 'Take profit target quantity', 1, ownerQty) };
+    });
+    unique(legs, 'take profit target');
+    if (legs.reduce((sum, leg) => sum + leg.qty, 0) > ownerQty) throw new Error('Take profit target quantities exceed remaining contracts');
+    return legs;
+}
+/** A missing marker is legacy only when no version-two execution fields are present. */
+export function validateExecutionVersion(input: unknown): 1 | 2 {
+    const x = object(input, 'Session');
+    if (x.executionVersion !== undefined && x.executionVersion !== 2) throw new Error('Unsupported execution version');
+    const has = (value: unknown, key: string): boolean => !!value && typeof value === 'object' && !Array.isArray(value) && Object.hasOwn(value, key);
+    const entriesHave = (value: unknown, key: string): boolean => Array.isArray(value) && value.some(entry => has(entry, key));
+    if (x.executionVersion === undefined && (has(x.position, 'takeProfits') || entriesHave(x.orders, 'takeProfits') || entriesHave(x.fills, 'takeProfitLegId') || entriesHave(x.trades, 'takeProfitLegId'))) throw new Error('Target legs and provenance require execution version 2');
+    return x.executionVersion === 2 ? 2 : 1;
 }
 export function safeLayout(v: unknown): unknown {
     let nodes = 0;
@@ -137,6 +160,7 @@ function unique(items: { id: string }[], label: string): void {
 /** Validate persisted/imported state before it can resume an account. Unknown fields are discarded. */
 export function validateStoredSession(input: unknown, bars: Bar[], expectedInstrument: Instrument): Session {
     const x = object(input, 'Session');
+    const executionVersion = validateExecutionVersion(input);
     if (!Array.isArray(bars) || bars.length < 1 || bars.length > 5000000) throw new Error('A session needs 1 to 5000000 source bars');
     const config = validateSessionConfig(x.config, bars.length);
     const instrument = validateInstrument(x.instrument);
@@ -146,6 +170,7 @@ export function validateStoredSession(input: unknown, bars: Bar[], expectedInstr
     const a = object(x.account, 'Account');
     const p = object(x.prop, 'Prop state');
     const session: Session = {
+        ...(executionVersion === 2 ? { executionVersion: 2 } : {}),
         id: id(x.id, 'Session ID'), config, instrument, cursor,
         status: choice(x.status, ['paused', 'completed', 'passed', 'failed'], 'Session status'),
         revision: integer(x.revision, 'Revision', 0, Number.MAX_SAFE_INTEGER - 1),
@@ -159,6 +184,10 @@ export function validateStoredSession(input: unknown, bars: Bar[], expectedInstr
         const side = choice(q.side, ['buy', 'sell'], 'Position side');
         session.position = { side, qty: integer(q.qty, 'Position quantity', 1, config.rules.maxContracts), avgPrice: number(q.avgPrice, 'Average price', 0.00000001, 1e9), entryTime: integer(q.entryTime, 'Entry time', 0, 8640000000000000), entryFees: number(q.entryFees, 'Entry fees', 0), mae: number(q.mae, 'MAE', 0), mfe: number(q.mfe, 'MFE', 0) };
         for (const key of ['stopLoss', 'takeProfit'] as const) if (q[key] !== undefined) session.position[key] = tickPrice(q[key], instrument, key);
+        if (q.takeProfits !== undefined) {
+            if (q.takeProfit !== undefined) throw new Error('Scalar take profit and target legs cannot be combined');
+            session.position.takeProfits = validateTakeProfits(q.takeProfits, instrument, session.position.qty);
+        }
         if (q.initialRisk !== undefined) session.position.initialRisk = number(q.initialRisk, 'Initial risk', 0.00000001);
     }
     session.orders = list(x.orders, 'Orders', LIMITS.orders).map(value => {
@@ -168,11 +197,11 @@ export function validateStoredSession(input: unknown, bars: Bar[], expectedInstr
     });
     session.fills = list(x.fills, 'Fills', LIMITS.fills).map(value => {
         const f = object(value, 'Fill');
-        return { id: id(f.id, 'Fill ID'), orderId: id(f.orderId, 'Order ID'), time: integer(f.time, 'Fill time', 0, 8640000000000000), side: choice(f.side, ['buy', 'sell'], 'Fill side'), qty: integer(f.qty, 'Fill quantity', 1, LIMITS.contracts * 2), price: tickPrice(f.price, instrument, 'Fill price'), fees: number(f.fees, 'Fill fees', 0), reason: text(f.reason, 'Fill reason', 100) };
+        return { id: id(f.id, 'Fill ID'), orderId: id(f.orderId, 'Order ID'), time: integer(f.time, 'Fill time', 0, 8640000000000000), side: choice(f.side, ['buy', 'sell'], 'Fill side'), qty: integer(f.qty, 'Fill quantity', 1, LIMITS.contracts * 2), price: tickPrice(f.price, instrument, 'Fill price'), fees: number(f.fees, 'Fill fees', 0), reason: text(f.reason, 'Fill reason', 100), ...(f.takeProfitLegId === undefined ? {} : { takeProfitLegId: id(f.takeProfitLegId, 'Take profit target ID') }) };
     });
     session.trades = list(x.trades, 'Trades', LIMITS.trades).map(value => {
         const t = object(value, 'Trade');
-        return { id: id(t.id, 'Trade ID'), side: choice(t.side, ['buy', 'sell'], 'Trade side'), qty: integer(t.qty, 'Trade quantity', 1, LIMITS.contracts), entryTime: integer(t.entryTime, 'Entry time', 0, 8640000000000000), exitTime: integer(t.exitTime, 'Exit time', 0, 8640000000000000), entryPrice: number(t.entryPrice, 'Entry price', 0.00000001, 1e9), exitPrice: number(t.exitPrice, 'Exit price', 0.00000001, 1e9), grossPnl: number(t.grossPnl, 'Gross PnL'), fees: number(t.fees, 'Trade fees', 0), netPnl: number(t.netPnl, 'Trade net PnL'), reason: text(t.reason, 'Trade reason', 100), initialRisk: optionalNumber(t, 'initialRisk', 0.00000001), mae: number(t.mae, 'MAE', 0), mfe: number(t.mfe, 'MFE', 0) };
+        return { id: id(t.id, 'Trade ID'), side: choice(t.side, ['buy', 'sell'], 'Trade side'), qty: integer(t.qty, 'Trade quantity', 1, LIMITS.contracts), entryTime: integer(t.entryTime, 'Entry time', 0, 8640000000000000), exitTime: integer(t.exitTime, 'Exit time', 0, 8640000000000000), entryPrice: number(t.entryPrice, 'Entry price', 0.00000001, 1e9), exitPrice: number(t.exitPrice, 'Exit price', 0.00000001, 1e9), grossPnl: number(t.grossPnl, 'Gross PnL'), fees: number(t.fees, 'Trade fees', 0), netPnl: number(t.netPnl, 'Trade net PnL'), reason: text(t.reason, 'Trade reason', 100), initialRisk: optionalNumber(t, 'initialRisk', 0.00000001), mae: number(t.mae, 'MAE', 0), mfe: number(t.mfe, 'MFE', 0), ...(t.takeProfitLegId === undefined ? {} : { takeProfitLegId: id(t.takeProfitLegId, 'Take profit target ID') }) };
     });
     session.equityCurve = list(x.equityCurve, 'Equity curve', LIMITS.curve).map(value => {
         const e = object(value, 'Equity point');
@@ -228,10 +257,12 @@ export function validateStoredSession(input: unknown, bars: Bar[], expectedInstr
             const entryFees = qty === ledger.qty ? ledger.fees : money(ledger.fees * qty / ledger.qty);
             const exitFees = qty === f.qty ? f.fees : money(f.fees * qty / f.qty);
             const trade = session.trades[closedTrades++];
+            if ((f.takeProfitLegId !== undefined && (f.qty > ledger.qty || f.reason !== 'Take profit')) || trade?.takeProfitLegId !== f.takeProfitLegId) throw new Error('Take profit target provenance does not match a reducing fill');
             if (!trade || trade.side !== ledger.side || trade.qty !== qty || trade.entryTime !== ledger.time || trade.exitTime !== f.time || !equalPrice(trade.entryPrice, ledger.price) || !equalPrice(trade.exitPrice, f.price) || !near(trade.fees, money(entryFees + exitFees))) throw new Error('Trades do not match execution cost basis');
             if (qty < ledger.qty) { ledger.qty -= qty; ledger.fees = money(ledger.fees - entryFees); }
             else ledger = f.qty > qty ? { side: f.side, qty: f.qty - qty, price: f.price, fees: money(f.fees - exitFees), time: f.time } : null;
-        } else if (ledger) {
+        } else if (f.takeProfitLegId !== undefined) throw new Error('Take profit target provenance cannot describe an entry');
+        else if (ledger) {
             ledger.price = (ledger.price * ledger.qty + f.price * f.qty) / (ledger.qty + f.qty);
             ledger.qty += f.qty; ledger.fees = money(ledger.fees + f.fees);
         } else ledger = { side: f.side, qty: f.qty, price: f.price, fees: f.fees, time: f.time };

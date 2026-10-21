@@ -3,7 +3,7 @@ import type { Vela, BarRange, SymbolInfo, OHLCV } from '../../src/index';
 import { iconMarkup, registerIcon, registerSidePanel, registerWidgetAction, registerWidgetAttachment, type WidgetContext } from '../../src/plugin';
 import type { Bar, ChartView, SessionView } from '../shared/types';
 import { LocalApi } from './api';
-import { revealedWindow, serverTimeframe } from './chart-data';
+import { replaySnapshot, revealedWindow, serverTimeframe } from './chart-data';
 import { sessionMarks } from './markers';
 import { bindChartOrderLines, refreshChartOrderLines } from './chart-order-lines';
 import type { TicketPriceSelection } from './trade-ticket';
@@ -114,6 +114,7 @@ export class ReplayCharts {
     private lastSaved = '';
     private restoring = false;
     private view: SessionView | null = null;
+    private dataView: SessionView | null = null;
     private syncPromise = Promise.resolve();
     private savePromise = Promise.resolve();
     private persistenceSuspended = false;
@@ -313,6 +314,9 @@ export class ReplayCharts {
     }
 
     sync(view: SessionView): Promise<void> {
+        if (this.dataView && (view.session.id !== this.dataView.session.id || view.dataset.id !== this.dataView.dataset.id
+            || view.dataset.checksum !== this.dataView.dataset.checksum || view.session.cursor < this.dataView.session.cursor)) this.bars.clear();
+        this.dataView = view;
         this.view = view;
         const generation = this.generation;
         return this.enqueue(() => this.renderData(view, generation));
@@ -328,14 +332,17 @@ export class ReplayCharts {
 
     private async renderData(view: SessionView, generation: number): Promise<void> {
             const workspace = this.workspace;
-            if (!workspace || generation !== this.generation) return;
+            const current = (): boolean => generation === this.generation && this.view?.session.id === view.session.id
+                && this.view.dataset.id === view.dataset.id && this.view.dataset.checksum === view.dataset.checksum
+                && this.view.session.cursor === view.session.cursor;
+            if (!workspace || !current()) return;
             const cells = workspace.cells();
             for (const cell of cells) {
                 const market = cell.chart.market;
                 if (market.symbol !== `replay:${view.dataset.symbol}` || !this.allowedTimeframe(market.timeframe ?? '1')) {
                     const valid = this.validTimeframes.get(cell.id) ?? '1';
                     await this.writeMarket(cell.chart, valid, this.bars.get(valid) ?? []);
-                    if (generation !== this.generation) return;
+                    if (!current()) return;
                 }
             }
             const timeframes = [...new Set(cells.map((cell) => cell.chart.market.timeframe ?? '1'))];
@@ -343,25 +350,25 @@ export class ReplayCharts {
             let nativeCursorTime: number | null = null;
             await Promise.all(timeframes.map(async (timeframe) => {
                 const prior = this.bars.get(timeframe) ?? [];
-                const result = await revealedWindow(this.api, view.session.id, timeframe, prior, this.controller.signal);
-                if (generation !== this.generation) return;
+                const result = await revealedWindow(this.api, view.session.id, timeframe, prior, this.controller.signal, view);
+                if (!current()) return;
                 const { bars } = result;
                 this.cursorTime = result.cursorTime;
                 if (timeframe === nativeTimeframe) nativeCursorTime = result.cursorTime;
                 this.bars.set(timeframe, bars);
                 await Promise.all(cells.filter((cell) => (cell.chart.market.timeframe ?? '1') === timeframe).map(async (cell) => {
                     await this.writeMarket(cell.chart, timeframe, bars);
-                    if (generation !== this.generation) return;
+                    if (!current()) return;
                 }));
             }));
-            if (generation !== this.generation) return;
+            if (!current()) return;
             let latest = this.bars.get(nativeTimeframe)?.at(-1);
             if (!timeframes.includes(nativeTimeframe)) {
-                const query = new URLSearchParams({ timeframe: serverTimeframe(nativeTimeframe), limit: '1' });
-                const current = await this.api.get<ChartView>(`/api/sessions/${encodeURIComponent(view.session.id)}/chart?${query}`, this.controller.signal);
-                if (generation !== this.generation) return;
-                latest = current.bars.at(-1);
-                this.cursorTime = current.cursorTime;
+                const query = new URLSearchParams({ timeframe: serverTimeframe(nativeTimeframe), limit: '1', snapshot: replaySnapshot(view) });
+                const quote = await this.api.get<ChartView>(`/api/sessions/${encodeURIComponent(view.session.id)}/chart?${query}`, this.controller.signal);
+                if (!current()) return;
+                latest = quote.bars.at(-1);
+                this.cursorTime = quote.cursorTime;
             } else this.cursorTime = nativeCursorTime;
             this.lastPrice = latest?.close ?? null;
             this.onPrice(this.lastPrice, this.cursorTime);
@@ -446,6 +453,10 @@ export class ReplayCharts {
                     if (current() && !blocked() && this.view) this.host.dispatchEvent(new CustomEvent('local-replay:chrome', { bubbles: true,
                         detail: { kind: 'ticket-bracket-select', bracket, price, sessionId: this.view.session.id, revision: this.view.session.revision } }));
                 },
+                selectTakeProfits: (takeProfits) => {
+                    if (current() && !blocked() && this.view) this.host.dispatchEvent(new CustomEvent('local-replay:chrome', { bubbles: true,
+                        detail: { kind: 'ticket-targets-select', takeProfits, sessionId: this.view.session.id, revision: this.view.session.revision } }));
+                },
                 clearPreview: () => {
                     if (current() && !blocked() && this.view) this.host.dispatchEvent(new CustomEvent('local-replay:chrome', { bubbles: true,
                         detail: { kind: 'ticket-clear-preview', sessionId: this.view.session.id, revision: this.view.session.revision } }));
@@ -501,7 +512,7 @@ export class ReplayCharts {
     private async fetchSeries(symbol: string, timeframe: string, range: BarRange, cutoff?: number, signal?: AbortSignal): Promise<OHLCV[]> {
         const view = this.view;
         if (!view || view.session.cursor < 0) return [];
-        const query = new URLSearchParams({ timeframe, limit: String(Math.min(range.limit ?? 5000, 250000)) });
+        const query = new URLSearchParams({ timeframe, limit: String(Math.min(range.limit ?? 5000, 250000)), snapshot: replaySnapshot(view) });
         query.set('symbol', symbol);
         query.set(cutoff === undefined ? 'cursor' : 'cutoff', String(cutoff ?? view.session.cursor));
         if (range.from !== undefined) query.set('from', String(Math.max(0, Math.floor(range.from))));
@@ -630,6 +641,7 @@ export class ReplayCharts {
         this.pineEngines.clear(); this.pineFactory = null;
         this.workspace = null;
         this.view = null;
+        this.dataView = null;
         this.lastPrice = null;
         this.cursorTime = null;
         this.bars.clear();

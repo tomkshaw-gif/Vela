@@ -1,6 +1,6 @@
 import './styles.css';
 import { DEFAULT_RULES, type Analytics, type Bootstrap, type Command, type DatasetMeta, type MonteCarlo,
-    type ProviderQuote, type ProviderRequest, type SessionConfig, type SessionCreateConfig, type SessionNavigation, type SessionSummary, type SessionView } from '../shared/types';
+    type ProviderQuote, type ProviderRequest, type SessionConfig, type SessionCreateConfig, type SessionNavigation, type SessionSummary, type SessionView, type TakeProfitLeg } from '../shared/types';
 import { LocalApi, ApiError } from './api';
 import { ReplayCharts } from './charts';
 import { RuntimeCoordinator, rememberSession, selectedSession, type RuntimeNotice } from './runtime';
@@ -17,6 +17,7 @@ import { mountSessionDashboard } from './session-dashboard';
 import { replayKeyStatsMarkup } from './replay-stats-dock';
 import { mountReplayEquityChart, type ReplayEquityChart } from './replay-equity-chart';
 import { TradeTicket } from './trade-ticket';
+import { mountPartialClose, partialCloseMarkup, readTargetLegs, TargetEditor, targetAllocationError, targetEditorMarkup } from './partial-exit-controls';
 import { persistDesktopSession } from './desktop-session';
 import type {} from './desktop-bridge';
 import './trade-ticket.css';
@@ -116,8 +117,8 @@ class ReplayStudio {
         const sessionResults = $('.results-panel');
         const resultsSlot = document.createComment('Session results home'); sessionResults.before(resultsSlot);
         const chrome = (event: Event): void => {
-            const detail = (event as CustomEvent<{ kind: string; target?: HTMLElement; command?: Command; sessionId?: string; revision?: number; price?: number | null; orderType?: 'limit' | 'stop'; side?: 'buy' | 'sell'; quantity?: number; bracket?: 'takeProfit' | 'stopLoss'; complete?: () => void }>).detail;
-            if ((!this.chartReady || this.mode === 'sessions' || this.navigating) && ['replay-toggle', 'date-jump', 'go-to', 'ticket-price-select', 'ticket-bracket-select', 'ticket-clear-preview', 'ticket-quantity-select', 'quick-market-order', 'order-command'].includes(detail.kind)) {
+            const detail = (event as CustomEvent<{ kind: string; target?: HTMLElement; command?: Command; sessionId?: string; revision?: number; price?: number | null; orderType?: 'limit' | 'stop'; side?: 'buy' | 'sell'; quantity?: number; bracket?: 'takeProfit' | 'stopLoss'; takeProfits?: TakeProfitLeg[]; complete?: () => void }>).detail;
+            if ((!this.chartReady || this.mode === 'sessions' || this.navigating) && ['replay-toggle', 'date-jump', 'go-to', 'ticket-price-select', 'ticket-bracket-select', 'ticket-targets-select', 'ticket-clear-preview', 'ticket-quantity-select', 'quick-market-order', 'order-command'].includes(detail.kind)) {
                 detail.complete?.(); return;
             }
             if (detail.kind === 'sessions') this.run(() => this.action('sessions', {}));
@@ -136,10 +137,11 @@ class ReplayStudio {
             if (detail.kind === 'replay-stats-mount' && detail.target) detail.target.append(sessionResults);
             if (detail.kind === 'replay-stats-unmount') resultsSlot.after(sessionResults);
             if (detail.kind === 'ticket-price-select' && Number.isFinite(detail.price)) this.tradeTicket.selectPrice(detail.price!, detail.orderType ?? 'limit');
-            if ((detail.kind === 'ticket-bracket-select' || detail.kind === 'ticket-clear-preview') && this.view
+            if ((detail.kind === 'ticket-bracket-select' || detail.kind === 'ticket-targets-select' || detail.kind === 'ticket-clear-preview') && this.view
                 && this.view.session.id === detail.sessionId && this.view.session.revision === detail.revision
                 && !this.runtimeBlocked && !this.starting && !this.disposed && !this.mutationBusy && !this.playing && !this.jumping) {
                 if (detail.kind === 'ticket-clear-preview') this.tradeTicket.clearPreview();
+                if (detail.kind === 'ticket-targets-select' && Array.isArray(detail.takeProfits)) this.tradeTicket.selectTakeProfits(detail.takeProfits);
                 if (detail.kind === 'ticket-bracket-select' && (detail.bracket === 'takeProfit' || detail.bracket === 'stopLoss')
                     && (detail.price === null || Number.isFinite(detail.price))) this.tradeTicket.selectBracket(detail.bracket, detail.price!);
             }
@@ -182,6 +184,11 @@ class ReplayStudio {
             void this.run(() => this.navigate(requested));
         };
         document.addEventListener('local-replay:chrome', chrome);
+        const partialClose = (event: Event): void => this.chartExitDialog(event as CustomEvent);
+        document.addEventListener('local-replay:chart-partial-close', partialClose);
+        document.addEventListener('local-replay:chart-edit-exits', partialClose);
+        this.disposers.push(() => document.removeEventListener('local-replay:chart-partial-close', partialClose),
+            () => document.removeEventListener('local-replay:chart-edit-exits', partialClose));
         window.addEventListener('hashchange', route);
         this.disposers.push(() => document.removeEventListener('local-replay:chrome', chrome), () => window.removeEventListener('hashchange', route));
         this.charts = new ReplayCharts($('#chart'), this.api,
@@ -601,13 +608,13 @@ class ReplayStudio {
         const position = this.view?.session.position;
         $('#position-badge').textContent = position ? `${position.side === 'buy' ? 'LONG' : 'SHORT'} ${position.qty}` : 'FLAT';
         $('#position-badge').className = position ? position.side === 'buy' ? 'positive' : 'negative' : 'muted';
-        $('#position-content').innerHTML = position ? `<div class="position-pnl ${pnlClass(this.view!.session.account.unrealizedPnl)}">${signedMoney(this.view!.session.account.unrealizedPnl)}<small>Unrealized P&L</small></div><div class="detail-row"><span>Average entry</span><strong>${number(position.avgPrice)}</strong></div><div class="detail-row"><span>Stop loss / target</span><strong>${position.stopLoss ? number(position.stopLoss) : '—'} / ${position.takeProfit ? number(position.takeProfit) : '—'}</strong></div><div class="position-actions"><button class="quiet" data-action="partial-close">Partial close</button><button class="quiet" data-action="reverse">Reverse</button><button class="quiet" data-action="amend-position">Edit exits</button></div><button class="close-position" data-action="close">Close simulated position <kbd>X</kbd></button>` : '<div class="empty-position">No open simulated position</div>';
+        $('#position-content').innerHTML = position ? `<div class="position-pnl ${pnlClass(this.view!.session.account.unrealizedPnl)}">${signedMoney(this.view!.session.account.unrealizedPnl)}<small>Unrealized P&L</small></div><div class="detail-row"><span>Average entry</span><strong>${number(position.avgPrice)}</strong></div><div class="detail-row"><span>Stop loss / target</span><strong>${position.stopLoss ? number(position.stopLoss) : '—'} / ${position.takeProfits?.length ? position.takeProfits.map((leg, i) => `TP${i + 1} ${number(leg.price)} &times; ${leg.qty}`).join(' &middot; ') : position.takeProfit ? number(position.takeProfit) : '—'}</strong></div>${position.takeProfits?.length ? `<div class="detail-row"><span>Target allocation / runner</span><strong>${position.takeProfits.reduce((sum, leg) => sum + leg.qty, 0)} / ${position.qty} contracts; ${position.qty - position.takeProfits.reduce((sum, leg) => sum + leg.qty, 0)} runner</strong></div>` : ''}<div class="position-actions"><button class="quiet" data-action="partial-close">Partial close</button><button class="quiet" data-action="reverse">Reverse</button><button class="quiet" data-action="amend-position">Edit exits</button></div><button class="close-position" data-action="close">Close simulated position <kbd>X</kbd></button>` : '<div class="empty-position">No open simulated position</div>';
     }
 
     private renderOrders(): void {
         const working = this.view?.session.orders.filter((order) => order.status === 'working') ?? [];
         $('#working-count').textContent = String(working.length);
-        $('#orders-content').innerHTML = working.length ? working.map((order) => `<div class="working-order"><div><strong class="${order.side === 'buy' ? 'positive' : 'negative'}">${order.side.toUpperCase()} ${order.qty}</strong> <span>${esc(order.type)}</span><small>${order.price ? number(order.price) : 'Next source bar'} · simulated</small></div><div><button class="quiet icon-button" data-action="amend-order" data-id="${esc(order.id)}" aria-label="Amend simulated order">✎</button><button class="quiet icon-button" data-action="cancel-order" data-id="${esc(order.id)}" aria-label="Cancel simulated order">×</button></div></div>`).join('') : '<div class="empty-position">No working simulated orders</div>';
+        $('#orders-content').innerHTML = working.length ? working.map((order) => `<div class="working-order"><div><strong class="${order.side === 'buy' ? 'positive' : 'negative'}">${order.side.toUpperCase()} ${order.qty}</strong> <span>${esc(order.type)}</span><small>${order.price ? number(order.price) : 'Next source bar'} · simulated</small>${order.takeProfits?.length ? `<small>${order.takeProfits.map((leg, i) => `TP${i + 1} ${number(leg.price)} &times; ${leg.qty}`).join(' &middot; ')}; ${order.qty - order.takeProfits.reduce((sum, leg) => sum + leg.qty, 0)} runner</small>` : ''}</div><div><button class="quiet icon-button" data-action="amend-order" data-id="${esc(order.id)}" aria-label="Amend simulated order">✎</button><button class="quiet icon-button" data-action="cancel-order" data-id="${esc(order.id)}" aria-label="Cancel simulated order">×</button></div></div>`).join('') : '<div class="empty-position">No working simulated orders</div>';
     }
 
     private renderRules(): void {
@@ -637,7 +644,7 @@ class ReplayStudio {
         if (this.activeTab === 'trading') {
             results.replaceChildren();
         } else if (this.activeTab === 'trades') {
-            results.innerHTML = session.trades.length ? `<table class="trade-table"><thead><tr><th>Direction</th><th>Qty</th><th>Entry → exit</th><th>Exit time · UTC</th><th>Fees</th><th>Net P&L</th><th>Exit reason</th></tr></thead><tbody>${session.trades.slice(-500).reverse().map((trade) => `<tr><td><span class="direction-pill ${trade.side === 'buy' ? 'long' : 'short'}">${trade.side === 'buy' ? 'LONG' : 'SHORT'}</span></td><td>${trade.qty}</td><td>${number(trade.entryPrice)} <span class="muted">→</span> ${number(trade.exitPrice)}</td><td class="muted">${utc(trade.exitTime).replace(' UTC', '')}</td><td>${money(trade.fees)}</td><td class="${pnlClass(trade.netPnl)}">${signedMoney(trade.netPnl)}</td><td class="muted">${esc(trade.reason)}</td></tr>`).join('')}</tbody></table>`
+            results.innerHTML = session.trades.length ? `<p class="field-note">Each row is a closed exit slice. Partial exits can produce several rows for one position.</p><table class="trade-table"><thead><tr><th>Direction</th><th>Qty</th><th>Entry → exit</th><th>Exit time · UTC</th><th>Fees</th><th>Net P&L</th><th>Exit reason</th></tr></thead><tbody>${session.trades.slice(-500).reverse().map((trade) => `<tr><td><span class="direction-pill ${trade.side === 'buy' ? 'long' : 'short'}">${trade.side === 'buy' ? 'LONG' : 'SHORT'}</span></td><td>${trade.qty}</td><td>${number(trade.entryPrice)} <span class="muted">→</span> ${number(trade.exitPrice)}</td><td class="muted">${utc(trade.exitTime).replace(' UTC', '')}</td><td>${money(trade.fees)}</td><td class="${pnlClass(trade.netPnl)}">${signedMoney(trade.netPnl)}</td><td class="muted">${esc(trade.reason)}</td></tr>`).join('')}</tbody></table>`
                 : '<div class="empty-small"><span class="empty-icon">⌁</span><strong>Every trade is a lesson.</strong>Your completed simulated trades will appear here.</div>';
         } else if (this.activeTab === 'bookmarks') {
             results.innerHTML = `<div class="bookmarks-heading"><p class="muted">Bookmark a decision point. Replay moves forward only; use a fresh attempt to revisit earlier bars.</p><button class="quiet" data-action="bookmark">＋ Add bookmark</button></div>${session.bookmarks.length ? session.bookmarks.map((bookmark) => `<div class="bookmark-row"><span>⚑</span><strong>${esc(bookmark.label)}</strong><time>${utc(bookmark.time)}</time></div>`).join('') : '<div class="empty-small">Save a moment worth revisiting.</div>'}`;
@@ -822,14 +829,51 @@ class ReplayStudio {
     }
 
     private partialCloseDialog(): void {
-        const qty = this.view?.session.position?.qty; if (!qty) return;
-        this.showDialog('Close part of your position', `<form id="partial-close-form" class="modal-form"><p class="muted">This simulated exit becomes eligible on the next source bar.</p><label>Contracts to close<input id="close-qty" type="number" min="1" max="${qty}" step="1" value="1" required /></label><div class="modal-actions"><button type="button" class="quiet" data-action="close-modal">Cancel</button><button class="primary">Submit simulated close</button></div></form>`);
+        const session = this.view?.session; const position = session?.position; if (!session || !position?.qty) return;
+        const owner = JSON.stringify([session.id, session.cursor, position.side, position.qty, position.avgPrice, position.entryTime]);
+        this.showDialog('Close part of your position', `<form id="partial-close-form" data-exit-owner="${esc(owner)}" data-exit-revision="${session.revision}" class="modal-form">${partialCloseMarkup(position.qty)}<div class="modal-actions"><button type="button" class="quiet" data-action="close-modal">Cancel</button><button class="primary">Submit simulated close</button></div></form>`);
+        mountPartialClose($<HTMLFormElement>('#partial-close-form'), position.qty);
+    }
+
+    private chartExitDialog(event: CustomEvent): void {
+        const detail = event.detail;
+        const session = this.view?.session;
+        if (!detail || !session || !this.chartReady || this.mode === 'sessions' || this.navigating || this.runtimeBlocked || this.starting
+            || this.disposed || this.mutationBusy || this.playing || this.jumping || session.status !== 'paused'
+            || session.id !== detail.sessionId || session.revision !== detail.revision || session.cursor !== detail.cursor) return;
+        if (detail.orderId && event.type === 'local-replay:chart-edit-exits') {
+            const order = session.orders.find(item => item.id === detail.orderId && item.status === 'working');
+            if (!order || order.qty !== detail.qty || order.side !== detail.side || order.createdTime !== detail.createdTime) return;
+            this.pause(); this.amendDialog(order.id); return;
+        }
+        const position = session.position;
+        if (!position || position.qty !== detail.qty || position.side !== detail.side || position.avgPrice !== detail.avgPrice || position.entryTime !== detail.entryTime) return;
+        this.pause();
+        if (event.type === 'local-replay:chart-edit-exits') this.amendDialog(); else this.partialCloseDialog();
     }
 
     private amendDialog(orderId?: string): void {
-        const order = orderId ? this.view?.session.orders.find((item) => item.id === orderId) : undefined;
-        const source = order ?? this.view?.session.position; if (!source) return;
-        this.showDialog(order ? 'Amend simulated order' : 'Edit protective exits', `<form id="amend-form" data-order-id="${esc(orderId ?? '')}" class="modal-form"><p class="muted">Leave an exit blank to remove it. Changes cannot fill retrospectively.</p>${order && order.type !== 'market' ? `<label>Order price<input id="amend-price" type="number" min="0.25" step="0.25" value="${order.price ?? ''}" required /></label>` : ''}<div class="two-fields"><label>Stop loss<input id="amend-stop" type="number" step="0.25" min="0.25" value="${source.stopLoss ?? ''}" /></label><label>Take profit<input id="amend-take" type="number" step="0.25" min="0.25" value="${source.takeProfit ?? ''}" /></label></div><div class="modal-actions"><button type="button" class="quiet" data-action="close-modal">Cancel</button><button class="primary">Save simulated exits</button></div></form>`);
+        const session = this.view?.session; if (!session) return;
+        const order = orderId ? session.orders.find((item) => item.id === orderId && item.status === 'working') : undefined;
+        if (orderId && !order) return;
+        const source = order ?? session.position; if (!source) return;
+        const owner = JSON.stringify(order ? [session.id, session.cursor, order.id, order.side, order.qty, order.createdTime]
+            : [session.id, session.cursor, session.position!.side, session.position!.qty, session.position!.avgPrice, session.position!.entryTime]);
+        const tick = this.view!.dataset.instrument.tickSize;
+        this.showDialog(order ? 'Amend simulated order' : 'Edit protective exits', `<form id="amend-form" data-order-id="${esc(orderId ?? '')}" data-exit-owner="${esc(owner)}" data-exit-revision="${session.revision}" data-had-targets="${!!source.takeProfits?.length}" class="modal-form"><p class="muted">Leave an exit blank to remove it. Changes cannot fill retrospectively. Manual reductions may trim the farthest targets when they fill; queued closes do not reserve target contracts. The stop covers all remaining contracts.</p>${order && order.type !== 'market' ? `<label>Order price<input id="amend-price" type="number" min="${tick}" step="${tick}" value="${order.price ?? ''}" required /></label>` : ''}<div class="two-fields"><label>Stop loss<input id="amend-stop" type="number" step="${tick}" min="${tick}" value="${source.stopLoss ?? ''}" /></label><label id="amend-scalar-target">Take profit · all remaining<input id="amend-take" type="number" step="${tick}" min="${tick}" value="${source.takeProfit ?? ''}" /></label></div>${targetEditorMarkup()}<div class="modal-actions"><button type="button" class="quiet" data-action="close-modal">Cancel</button><button class="primary">Save simulated exits</button></div></form>`);
+        const form = $<HTMLFormElement>('#amend-form');
+        const refresh = (): void => {
+            const error = targets.error;
+            const feedback = $<HTMLElement>('#dialog-error');
+            if (error) { feedback.textContent = error; feedback.hidden = false; }
+            form.querySelector<HTMLButtonElement>('.primary')!.disabled = error !== null || form.dataset.exitSaving === 'true';
+        };
+        const targets = new TargetEditor(form.querySelector('[data-target-editor]')!, { quantity: () => source.qty, tick: () => tick,
+            scalar: form.querySelector('#amend-take')!, scalarContainer: form.querySelector('#amend-scalar-target')!,
+            changed: () => { $<HTMLElement>('#dialog-error').hidden = true; refresh(); } });
+        targets.setLegs(source.takeProfits ?? []);
+        form.addEventListener('local-replay:exit-refresh', refresh);
+        refresh();
     }
 
     private goToDialog(): void {
@@ -1101,21 +1145,39 @@ class ReplayStudio {
         const sessionGeneration = this.sessionGeneration; const sessionId = this.view?.session.id; const revision = this.view?.session.revision;
         const navigationGeneration = this.navigationGeneration;
         const orderId = form.dataset.orderId;
+        const exitOwner = form.dataset.exitOwner;
+        const currentExitOwner = (): string | undefined => {
+            const session = this.view?.session; if (!exitOwner || !session) return undefined;
+            if (orderId) {
+                const order = session.orders.find(item => item.id === orderId && item.status === 'working');
+                return order ? JSON.stringify([session.id, session.cursor, order.id, order.side, order.qty, order.createdTime]) : undefined;
+            }
+            const position = session.position;
+            return position ? JSON.stringify([session.id, session.cursor, position.side, position.qty, position.avgPrice, position.entryTime]) : undefined;
+        };
         const fields = Array.from(form.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>('input,select,textarea'), field => ({
-            field, value: field.value, checked: field instanceof HTMLInputElement ? field.checked : undefined,
+            field, value: field.value, disabled: field.disabled, checked: field instanceof HTMLInputElement ? field.checked : undefined,
         }));
         const ownsForm = (): boolean => modal.open && modal.contains(form) && form.isConnected && modalGeneration === this.modalGeneration
             && sessionGeneration === this.sessionGeneration && sessionId === this.view?.session.id && orderId === form.dataset.orderId
-            && navigationGeneration === this.navigationGeneration;
-        const unchanged = (): boolean => !form.querySelector('[data-date-time-trigger][aria-expanded="true"]')
-            && fields.every(({ field, value, checked }) => field.isConnected && field.value === value
-            && (!(field instanceof HTMLInputElement) || field.checked === checked));
+            && navigationGeneration === this.navigationGeneration && (!exitOwner || exitOwner === currentExitOwner());
+        const unchanged = (): boolean => {
+            const live = Array.from(form.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>('input,select,textarea'));
+            return !form.querySelector('[data-date-time-trigger][aria-expanded="true"]') && live.length === fields.length
+                && fields.every(({ field, value, checked, disabled }, i) => field === live[i] && field.isConnected && field.value === value && field.disabled === disabled
+                    && (!(field instanceof HTMLInputElement) || field.checked === checked));
+        };
         const saveCommand = async (command: Command, message?: string): Promise<void> => {
             const outcome = await this.command(command, false, revision);
-            if (outcome !== 'accepted' || !ownsForm() || !unchanged()) return;
+            if (outcome !== 'accepted' || !ownsForm() || !unchanged() || exitOwner && this.view?.session.revision !== revision! + 1) return;
             modal.close(); if (message) this.toast(message);
         };
         try {
+            if (exitOwner) {
+                if (!ownsForm() || Number(form.dataset.exitRevision) !== revision) throw new Error('The position or session changed. Reopen this dialog before submitting.');
+                if (!form.reportValidity()) return;
+                form.dataset.exitSaving = 'true';
+            }
             switch (form.id) {
                 case 'new-session-form': {
                     const created = await this.createSession(form);
@@ -1143,9 +1205,19 @@ class ReplayStudio {
                 case 'dataset-import-form': await this.importDataset(); break;
                 case 'rename-form': await saveCommand({ type: 'rename', name: value('simple-value').trim() }); break;
                 case 'bookmark-form': await saveCommand({ type: 'bookmark', label: value('simple-value').trim() }, 'Replay bookmark saved.'); break;
-                case 'partial-close-form': await saveCommand({ type: 'close', qty: numeric('close-qty') }); break;
+                case 'partial-close-form': {
+                    const qty = numeric('close-qty');
+                    if (!Number.isSafeInteger(qty) || qty < 1 || qty > (this.view?.session.position?.qty ?? 0)) throw new Error('Choose an available whole-contract close quantity.');
+                    await saveCommand({ type: 'close', qty }); break;
+                }
                 case 'amend-form': {
-                    const command: Command = { type: 'amend', stopLoss: optionalNumber('amend-stop') ?? null, takeProfit: optionalNumber('amend-take') ?? null };
+                    const legs = readTargetLegs(form);
+                    const qty = orderId ? this.view?.session.orders.find(order => order.id === orderId)?.qty : this.view?.session.position?.qty;
+                    const error = targetAllocationError(legs, qty ?? 0, this.view!.dataset.instrument.tickSize);
+                    if (error) throw new Error(error);
+                    const command: Command = { type: 'amend', stopLoss: optionalNumber('amend-stop') ?? null,
+                        ...(legs.length ? { takeProfits: legs, takeProfit: null } : { takeProfit: optionalNumber('amend-take') ?? null,
+                            ...(form.dataset.hadTargets === 'true' ? { takeProfits: null } : {}) }) };
                     if (form.dataset.orderId) command.orderId = form.dataset.orderId;
                     if (document.querySelector('#amend-price')) command.price = numeric('amend-price');
                     await saveCommand(command); break;
@@ -1157,7 +1229,11 @@ class ReplayStudio {
             else if (!this.disposed && !(error instanceof DOMException && error.name === 'AbortError')) {
                 this.toast(error instanceof Error ? error.message : 'The local request could not be completed.', true);
             }
-        } finally { if (submit?.isConnected) submit.disabled = false; }
+        } finally {
+            delete form.dataset.exitSaving;
+            if (submit?.isConnected) submit.disabled = false;
+            if (exitOwner && form.isConnected) form.dispatchEvent(new Event('local-replay:exit-refresh'));
+        }
     }
 
     private async createSession(form: HTMLFormElement): Promise<SessionView> {

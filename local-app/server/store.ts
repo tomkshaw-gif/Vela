@@ -7,7 +7,7 @@ import type { TimeframeDescriptor } from '../shared/timeframes';
 import { nextTimeframeBucket, timeframeBucket } from '../shared/timeframes';
 import { checksum, instrumentFor, interval, MAX_BARS, validateBars } from './data';
 import { AppError, text } from './errors';
-import { integer, validateSessionConfig } from '../engine/validation';
+import { integer, validateExecutionVersion, validateSessionConfig } from '../engine/validation';
 
 type DatasetInput = { name: string; symbol: string; schema: Schema; source: DatasetMeta['source']; bars: Bar[]; scope?: string };
 type SourceBoundary = { idx: number; time: number };
@@ -29,6 +29,13 @@ export class ReplayStore {
           CREATE TABLE IF NOT EXISTS bars(dataset_id TEXT NOT NULL REFERENCES datasets(id), idx INTEGER NOT NULL, time INTEGER NOT NULL, open REAL NOT NULL, high REAL NOT NULL, low REAL NOT NULL, close REAL NOT NULL, volume INTEGER NOT NULL, PRIMARY KEY(dataset_id, idx), UNIQUE(dataset_id, time)) WITHOUT ROWID;
           CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, revision INTEGER NOT NULL, updated_at TEXT NOT NULL, state TEXT NOT NULL, summary TEXT NOT NULL);
           CREATE INDEX IF NOT EXISTS sessions_updated ON sessions(updated_at DESC);`);
+        // Older runtimes must not erase execution fields that they do not understand.
+        this.db.exec(`CREATE TRIGGER IF NOT EXISTS sessions_execution_version_update
+          BEFORE UPDATE OF state ON sessions
+          WHEN json_extract(OLD.state, '$.executionVersion') >= 2 AND
+            (json_type(NEW.state, '$.executionVersion') IS NOT 'integer' OR
+             json_extract(NEW.state, '$.executionVersion') < json_extract(OLD.state, '$.executionVersion'))
+          BEGIN SELECT RAISE(ABORT, 'This session requires a newer application version.'); END;`);
         const columns = this.db.prepare('PRAGMA table_info(sessions)').all() as { name: string }[];
         if (!columns.some(column => column.name === 'summary')) {
             this.db.exec("ALTER TABLE sessions ADD COLUMN summary TEXT NOT NULL DEFAULT ''");
@@ -142,6 +149,7 @@ export class ReplayStore {
         const row = this.db.prepare('SELECT state FROM sessions WHERE id=?').get(id) as { state: string } | undefined;
         if (!row) throw new AppError(404, 'Session not found.', 'NOT_FOUND');
         const state = JSON.parse(row.state) as Session;
+        validateExecutionVersion(state);
         const dataset = this.dataset(state.config.datasetId);
         const config = validateSessionConfig(state.config, dataset.barCount);
         integer(state.cursor, 'Cursor', config.startIndex - 1, (config.endIndex ?? dataset.barCount) - 1);
@@ -163,12 +171,14 @@ export class ReplayStore {
         return { id: state.id, name: config.name, datasetId: dataset.id, symbol: dataset.symbol, mode: config.mode, status: state.status, cursor: state.cursor, barCount: dataset.barCount, startIndex: config.startIndex, endIndex, startTime: start.time, endTime: endIndex === dataset.barCount ? dataset.end : end!.time, equity: state.account.equity, netPnl: state.account.netPnl, trades: state.trades.length, updatedAt: state.updatedAt, revision: state.revision };
     }
     createSession(session: Session): Session {
+        validateExecutionVersion(session);
         const count = this.db.prepare('SELECT COUNT(*) AS count FROM sessions').get() as { count: number };
         if (count.count >= MAX_SESSIONS) throw new AppError(413, 'Local session capacity reached.');
         this.db.prepare('INSERT INTO sessions(id,revision,updated_at,state,summary) VALUES(?,?,?,?,?)').run(session.id, session.revision, session.updatedAt, JSON.stringify(session), JSON.stringify(this.summarize(session)));
         return session;
     }
     saveSession(session: Session, expectedRevision: number): Session {
+        validateExecutionVersion(session);
         if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) throw new AppError(400, 'Invalid expected revision.');
         this.db.exec('BEGIN IMMEDIATE');
         try {

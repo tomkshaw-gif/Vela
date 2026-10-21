@@ -16,12 +16,14 @@
 .local-order-line[data-kind=position] .local-order-text[data-profit=negative]{color:#f23645}
 .local-chart-orders .local-order-line button:disabled{cursor:default}
 .local-chart-orders .local-order-line button.local-order-cancel,.local-chart-orders .local-order-line button.local-order-reverse{border-left:1px solid color-mix(in srgb,var(--order-color) 16%,transparent);cursor:pointer;width:23px;flex-shrink:0}
-.local-order-line[data-hovered=false][data-selected=false] .local-order-reverse{display:none!important}
+.local-chart-orders .local-order-line button.local-order-partial{border-left:1px solid color-mix(in srgb,var(--order-color) 16%,transparent);cursor:pointer;width:25px;flex-shrink:0}
+.local-order-line[data-hovered=false][data-selected=false] .local-order-reverse{visibility:hidden;pointer-events:none!important}
 .local-order-line:is([data-hovered=true],[data-selected=true]){pointer-events:auto}
 .local-order-add-exits{display:flex;gap:0;align-items:center;height:19px;pointer-events:auto}
 .local-order-line[data-kind=position] .local-order-add-exits{order:1}
 .local-chart-orders .local-order-line button.local-order-add-exit{height:19px;border:1px dotted currentColor;border-radius:4px;padding:0 6px;background:var(--local-order-surface);color:#089981}
 .local-chart-orders .local-order-line button.local-order-add-exit[data-order-add-exit=stopLoss]{color:#ff9800}
+.local-chart-orders .local-order-line button[data-order-edit-targets]{cursor:pointer}
 .local-order-line[data-hovered=false][data-selected=false] .local-order-add-exits{visibility:hidden;pointer-events:none}
 .local-order-line[data-projection=true] .local-order-body{pointer-events:none;opacity:.75}
 .local-order-line[data-projection=true] .local-order-replay{display:none}

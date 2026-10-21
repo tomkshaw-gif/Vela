@@ -6,6 +6,11 @@ All notable changes to Vela, newest first.
 
 ### Added
 
+- **Partial exits and take-profit targets.** Close a percentage or an exact number
+  of remaining contracts, and split an entry or open position across individual
+  price targets. Each target keeps its own quantity and draggable chart line;
+  the stop continues to protect the remaining position.
+
 - **Desktop update button.** Check for updates from the bottom-left control and
   choose when to restart. Downloads stay in the background; installing first
   saves the workspace and closes the local runtime.
@@ -87,6 +92,10 @@ All notable changes to Vela, newest first.
   application runs on localhost and keeps credentials out of browser responses.
 
 ### Fixed
+
+- **Consistent replay snapshots.** Refreshing a chart keeps its candles and
+  simulated quotes aligned with the account snapshot shown in that window,
+  including when another window advances the same session.
 
 - **Stable replay framing.** Advancing historical candles keeps your zoom, right
   margin and manual price scales. Wide charts zoom in consistently, and dragging

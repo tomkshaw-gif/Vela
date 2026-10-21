@@ -1,7 +1,8 @@
 import { validateDraft } from '../engine/validation';
-import type { OrderDraft, SessionView, Side } from '../shared/types';
+import type { OrderDraft, SessionView, Side, TakeProfitLeg } from '../shared/types';
+import { sameTakeProfitLegs, TargetEditor, targetAllocationError, targetEditorMarkup } from './partial-exit-controls';
 
-export interface TicketPriceSelection { side: Side; type: OrderDraft['type']; price: number | null; qty?: number; takeProfit?: number | null; stopLoss?: number | null }
+export interface TicketPriceSelection { side: Side; type: OrderDraft['type']; price: number | null; qty?: number; takeProfit?: number | null; stopLoss?: number | null; takeProfits?: TakeProfitLeg[] }
 export interface TradeTicketHooks { submit(side: Side): void; isBlocked?(): boolean }
 
 function priceControl(id: string, title: string, showLabel = true): string {
@@ -9,7 +10,7 @@ function priceControl(id: string, title: string, showLabel = true): string {
 }
 
 function exitControl(id: string, enabledId: string, title: string): string {
-    return `<div class="ticket-exit-field" data-exit="${id}"><div class="ticket-exit-heading"><label for="${id}">${title} price</label><label class="ticket-exit-toggle"><input type="checkbox" role="switch" id="${enabledId}" aria-label="${title}" /><span class="ticket-switch-track" aria-hidden="true"><span></span></span></label></div>${priceControl(id, `${title} price`, false)}</div>`;
+    return `<div class="ticket-exit-field" data-exit="${id}"><div class="ticket-exit-heading"><label for="${id}">${title} price</label><label class="ticket-exit-toggle"><input type="checkbox" role="switch" id="${enabledId}" aria-label="${title}" /><span class="ticket-switch-track" aria-hidden="true"><span></span></span></label></div>${priceControl(id, `${title} price`, false)}${id === 'take-profit' ? targetEditorMarkup() : ''}</div>`;
 }
 
 export function tradeTicketMarkup(): string {
@@ -38,8 +39,15 @@ export class TradeTicket {
     private reportedQuantity: number | null = null;
     private waitingForEdit = false;
     private disposers: (() => void)[] = [];
+    private readonly targets: TargetEditor;
 
     constructor(private readonly form: HTMLFormElement, private readonly hooks: TradeTicketHooks) {
+        this.targets = new TargetEditor(this.node('[data-target-editor]'), {
+            quantity: () => Number(this.field('order-qty').value), tick: () => this.view?.dataset.instrument.tickSize ?? 0.25,
+            enabled: () => this.field('ticket-tp-enabled').checked, scalar: this.field('take-profit'),
+            scalarContainer: this.node('#take-profit-control-label'), scalarRequired: true,
+            changed: () => { this.waitingForEdit = false; this.refresh(); },
+        });
         const click = (event: MouseEvent): void => {
             const button = (event.target as Element).closest<HTMLButtonElement>('button');
             if (!button || button.disabled) return;
@@ -82,6 +90,7 @@ export class TradeTicket {
         if (nextSession !== this.sessionId) {
             this.sessionId = nextSession;
             this.form.reset(); this.side = 'buy'; this.picking = false; this.exitsExpanded = true;
+            this.targets.setLegs([]);
             this.reportedQuantity = null;
             this.waitingForEdit = false;
         }
@@ -128,11 +137,23 @@ export class TradeTicket {
     /** Chart draft controls edit the ticket only; working orders use session commands. */
     selectBracket(kind: 'takeProfit' | 'stopLoss', price: number | null): void {
         if (!this.view || this.hooks.isBlocked?.()) return;
+        if (kind === 'takeProfit' && this.targets.hasLegs) return;
         const tick = this.view.dataset.instrument.tickSize;
         if (price !== null && (!Number.isFinite(price) || price <= 0)) return;
         const id = kind === 'takeProfit' ? 'take-profit' : 'stop-loss';
         this.field(kind === 'takeProfit' ? 'ticket-tp-enabled' : 'ticket-sl-enabled').checked = price !== null;
         if (price !== null) this.field(id).value = this.aligned(price, tick);
+        this.waitingForEdit = false;
+        this.refresh();
+    }
+
+    /** A chart edits the complete target allocation without creating new leg identities. */
+    selectTakeProfits(legs: TakeProfitLeg[]): void {
+        if (!this.view || this.hooks.isBlocked?.()) return;
+        if (targetAllocationError(legs, Number(this.field('order-qty').value), this.view.dataset.instrument.tickSize)) return;
+        this.targets.setLegs(legs);
+        this.field('take-profit').value = '';
+        this.field('ticket-tp-enabled').checked = legs.length > 0;
         this.waitingForEdit = false;
         this.refresh();
     }
@@ -146,9 +167,11 @@ export class TradeTicket {
     retireDraft(submitted: OrderDraft): void {
         const current = this.readDraft();
         if ((['side', 'type', 'qty', 'price', 'stopLoss', 'takeProfit'] as const).some(key => current[key] !== submitted[key])) return;
+        if (!sameTakeProfitLegs(current.takeProfits, submitted.takeProfits)) return;
         this.field('order-price').value = '';
         this.field('ticket-tp-enabled').checked = false;
         this.field('ticket-sl-enabled').checked = false;
+        this.targets.setLegs([]);
         this.picking = false;
         this.waitingForEdit = true;
         this.refresh();
@@ -176,6 +199,7 @@ export class TradeTicket {
             const distance = value && base && tick ? (Number(value) - base) / tick * (this.side === 'buy' ? 1 : -1) * (id === 'stop-loss' ? -1 : 1) : null;
             this.node(`[data-ticket-equivalent="${id}"]`).textContent = `${distance !== null && Number.isFinite(distance) ? this.formatNumber(distance) : '—'} ticks`;
         }
+        this.targets.refresh();
         this.node('#ticket-exit-fields').hidden = !this.exitsExpanded;
         this.node('[data-ticket-exits]').setAttribute('aria-expanded', String(this.exitsExpanded));
         for (const control of this.form.querySelectorAll<HTMLButtonElement>('[data-ticket-step], [data-ticket-pick]')) {
@@ -200,6 +224,7 @@ export class TradeTicket {
         };
         const detail: TicketPriceSelection = { side: this.side, type, price: type === 'market' || !price.value || !price.validity.valid ? null : Number(price.value),
             qty: this.validQuantity(quantity) ? quantity : undefined, takeProfit: exit('take-profit'), stopLoss: exit('stop-loss') };
+        if (this.field('ticket-tp-enabled').checked && this.targets.hasLegs && !this.targets.error) detail.takeProfits = this.targets.legs;
         this.form.dispatchEvent(new CustomEvent<TicketPriceSelection>('local-replay:ticket-price', { bubbles: true, detail }));
         this.form.querySelector('[data-ticket-pick]')?.setAttribute('aria-pressed', String(this.picking));
         this.form.dispatchEvent(new CustomEvent('local-replay:ticket-pick', { bubbles: true, detail: { active: this.picking, type } }));
@@ -217,7 +242,7 @@ export class TradeTicket {
         return this.readDraft();
     }
 
-    destroy(): void { for (const dispose of this.disposers.splice(0)) dispose(); }
+    destroy(): void { this.targets.destroy(); for (const dispose of this.disposers.splice(0)) dispose(); }
 
     private field(id: string): HTMLInputElement { return this.node<HTMLInputElement>(`#${id}`); }
     private validQuantity(quantity: number): boolean { return Number.isInteger(quantity) && quantity >= 1 && quantity <= (this.view?.session.config.rules.maxContracts ?? 1000); }
@@ -247,10 +272,12 @@ export class TradeTicket {
         const draft: OrderDraft = { side: this.side, type: this.type(), qty: Number(this.field('order-qty').value) };
         if (draft.type !== 'market') draft.price = Number(this.field('order-price').value);
         for (const [id, key] of [['stop-loss', 'stopLoss'], ['take-profit', 'takeProfit']] as const) if (!this.field(id).disabled) draft[key] = Number(this.field(id).value);
+        if (this.field('ticket-tp-enabled').checked && this.targets.hasLegs) draft.takeProfits = this.targets.legs;
         return draft;
     }
     private validationError(): string | null {
         if (!this.view) return null;
+        if (this.targets.error) return this.targets.error;
         try {
             const draft = validateDraft(this.readDraft(), this.view.dataset.instrument, this.lastPrice ?? undefined);
             if (draft.qty > this.view.session.config.rules.maxContracts) return `Contracts cannot exceed ${this.view.session.config.rules.maxContracts}.`;

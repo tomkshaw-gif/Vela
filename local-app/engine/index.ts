@@ -1,5 +1,5 @@
 import type { Bar, Command, DayStat, Instrument, Order, OrderDraft, Position, Session, SessionConfig, Side } from '../shared/types';
-import { choice, id, integer, LIMITS, money, object, safeLayout, text, tickPrice, validateBar, validateDraft, validateInstrument, validateSessionConfig, validateStoredSession } from './validation';
+import { choice, id, integer, LIMITS, money, object, safeLayout, text, tickPrice, validateBar, validateDraft, validateInstrument, validateSessionConfig, validateStoredSession, validateTakeProfits } from './validation';
 export { validateSessionConfig, validateStoredSession } from './validation';
 export { analytics, monteCarlo } from './statistics';
 
@@ -105,6 +105,18 @@ function contractsFit(s: Session, draft?: OrderDraft, excludedId?: string): void
     }
     if (Math.max(Math.abs(current + buys), Math.abs(current - sells)) > s.config.rules.maxContracts) throw new Error(`Orders could exceed the ${s.config.rules.maxContracts}-contract limit`);
 }
+function bracketCompatibility(s: Session, draft: OrderDraft): void {
+    const p = s.position;
+    if (!p) return;
+    if (p.side !== draft.side) {
+        const opened = draft.qty - p.qty;
+        if (opened <= 0 && draft.takeProfits !== undefined) throw new Error('A purely reducing order cannot carry take profit target legs');
+        if (draft.takeProfits !== undefined && opened > 0) validateTakeProfits(draft.takeProfits, s.instrument, opened);
+        return;
+    }
+    if ((p.takeProfit !== undefined && draft.takeProfits !== undefined) || (p.takeProfits !== undefined && draft.takeProfit !== undefined)) throw new Error('Scalar take profit and target legs cannot be combined on a scale-in');
+    if (draft.takeProfits !== undefined) validateTakeProfits([...(p.takeProfits ?? []), ...draft.takeProfits], s.instrument, p.qty + draft.qty);
+}
 function queue(s: Session, draft: OrderDraft, time: number): Order {
     if (s.orders.length >= LIMITS.orders) throw new Error('Order history limit reached; start a separate attempt');
     contractsFit(s, draft);
@@ -112,7 +124,19 @@ function queue(s: Session, draft: OrderDraft, time: number): Order {
     s.orders.push(order);
     return order;
 }
-function fill(s: Session, orderId: string, side: Side, qty: number, price: number, reference: number, time: number, reason: string, bracket?: OrderDraft): void {
+/** Preserve earlier legs at equal prices when a reduction releases farthest allocations. */
+function reconcileTakeProfits(p: Position): void {
+    if (p.takeProfits === undefined) return;
+    let excess = p.takeProfits.reduce((sum, leg) => sum + leg.qty, 0) - p.qty;
+    const farthest = p.takeProfits.map((leg, index) => ({ leg, index })).sort((a, b) => sign(p.side) * (b.leg.price - a.leg.price) || b.index - a.index);
+    for (const { leg } of farthest) {
+        if (excess <= 0) break;
+        const released = Math.min(leg.qty, excess);
+        leg.qty -= released; excess -= released;
+    }
+    p.takeProfits = p.takeProfits.filter(leg => leg.qty > 0);
+}
+function fill(s: Session, orderId: string, side: Side, qty: number, price: number, reference: number, time: number, reason: string, bracket?: OrderDraft, takeProfitLegId?: string): void {
     if (s.fills.length >= LIMITS.fills) throw new Error('Fill history limit reached; start a separate attempt');
     const fees = money(qty * s.config.commissionPerContractSide);
     const p = s.position;
@@ -121,7 +145,8 @@ function fill(s: Session, orderId: string, side: Side, qty: number, price: numbe
     const day = dayAt(s, time);
     day.traded = true;
     day.realizedPnl = money(day.realizedPnl - fees);
-    s.fills.push({ id: localId(s, 'f', s.fills.length), orderId, time, side, qty, price, fees, reason });
+    const provenance = takeProfitLegId === undefined ? {} : { takeProfitLegId };
+    s.fills.push({ id: localId(s, 'f', s.fills.length), orderId, time, side, qty, price, fees, reason, ...provenance });
     if (p && p.side !== side) {
         if (s.trades.length >= LIMITS.trades) throw new Error('Trade history limit reached; start a separate attempt');
         const closed = Math.min(p.qty, qty);
@@ -129,15 +154,20 @@ function fill(s: Session, orderId: string, side: Side, qty: number, price: numbe
         const exitFees = closed === qty ? fees : money(fees * closed / qty);
         const grossPnl = money((price - p.avgPrice) * sign(p.side) * closed * s.instrument.pointValue);
         const tradeFees = money(entryFees + exitFees);
-        s.trades.push({ id: localId(s, 't', s.trades.length), side: p.side, qty: closed, entryTime: p.entryTime, exitTime: time, entryPrice: p.avgPrice, exitPrice: price, grossPnl, fees: tradeFees, netPnl: money(grossPnl - tradeFees), reason, initialRisk: p.initialRisk === undefined ? undefined : p.initialRisk * closed / p.qty, mae: p.mae * closed / p.qty, mfe: p.mfe * closed / p.qty });
+        s.trades.push({ id: localId(s, 't', s.trades.length), side: p.side, qty: closed, entryTime: p.entryTime, exitTime: time, entryPrice: p.avgPrice, exitPrice: price, grossPnl, fees: tradeFees, netPnl: money(grossPnl - tradeFees), reason, initialRisk: p.initialRisk === undefined ? undefined : p.initialRisk * closed / p.qty, mae: p.mae * closed / p.qty, mfe: p.mfe * closed / p.qty, ...provenance });
         day.trades++;
         day.realizedPnl = money(day.realizedPnl + grossPnl);
         s.account.balance = money(s.account.balance + grossPnl);
+        if (takeProfitLegId !== undefined) {
+            const leg = p.takeProfits?.find(leg => leg.id === takeProfitLegId);
+            if (leg) leg.qty -= closed;
+        }
         if (closed < p.qty) {
             const fraction = (p.qty - closed) / p.qty;
             p.qty -= closed; p.entryFees = money(p.entryFees - entryFees);
             p.mae *= fraction; p.mfe *= fraction;
             if (p.initialRisk !== undefined) p.initialRisk *= fraction;
+            reconcileTakeProfits(p);
         } else {
             s.position = null;
             if (qty > closed) s.position = newPosition(s, side, qty - closed, price, time, money(fees - exitFees), bracket);
@@ -148,6 +178,7 @@ function fill(s: Session, orderId: string, side: Side, qty: number, price: numbe
         p.qty += qty; p.entryFees = money(p.entryFees + fees);
         if (bracket?.stopLoss !== undefined) p.stopLoss = bracket.stopLoss;
         if (bracket?.takeProfit !== undefined) p.takeProfit = bracket.takeProfit;
+        if (bracket?.takeProfits !== undefined) p.takeProfits = [...(p.takeProfits ?? []), ...bracket.takeProfits.map(leg => ({ ...leg }))];
         if (p.stopLoss !== undefined) p.initialRisk = Math.max(0, (p.avgPrice - p.stopLoss) * sign(p.side) * p.qty * s.instrument.pointValue) || oldRisk;
     } else s.position = newPosition(s, side, qty, price, time, fees, bracket);
     day.endBalance = s.account.balance;
@@ -155,7 +186,8 @@ function fill(s: Session, orderId: string, side: Side, qty: number, price: numbe
 }
 function newPosition(s: Session, side: Side, qty: number, price: number, time: number, fees: number, bracket?: OrderDraft): Position {
     const risk = bracket?.stopLoss === undefined ? undefined : Math.max(0, (price - bracket.stopLoss) * sign(side) * qty * s.instrument.pointValue);
-    return { side, qty, avgPrice: price, entryTime: time, entryFees: fees, stopLoss: bracket?.stopLoss, takeProfit: bracket?.takeProfit, initialRisk: risk && risk > 0 ? risk : undefined, mae: 0, mfe: 0 };
+    return { side, qty, avgPrice: price, entryTime: time, entryFees: fees, stopLoss: bracket?.stopLoss, takeProfit: bracket?.takeProfit,
+        ...(bracket?.takeProfits === undefined ? {} : { takeProfits: bracket.takeProfits.map(leg => ({ ...leg })) }), initialRisk: risk && risk > 0 ? risk : undefined, mae: 0, mfe: 0 };
 }
 function flatten(s: Session, base: number, time: number, reason: string, limit?: number): void {
     const p = s.position;
@@ -203,6 +235,28 @@ function excursions(s: Session, price: number): void {
     const pnl = (price - p.avgPrice) * sign(p.side) * p.qty * s.instrument.pointValue;
     p.mae = Math.max(p.mae, -pnl, 0); p.mfe = Math.max(p.mfe, pnl, 0);
 }
+function positionTargets(s: Session, bar: Bar, entryReference: number, from: number, openingGap = false): number | null {
+    const p = s.position;
+    if (!p?.takeProfits) return from;
+    const favorable = openingGap ? bar.open : p.side === 'buy' ? bar.high : bar.low;
+    const touched = p.takeProfits.filter(leg => p.side === 'buy' ? favorable >= leg.price : favorable <= leg.price)
+        .sort((a, b) => sign(p.side) * (a.price - b.price));
+    for (const target of touched) {
+        const position = s.position;
+        const leg = position?.takeProfits?.find(leg => leg.id === target.id);
+        if (!position || !leg) continue;
+        const base = position.side === 'buy' ? Math.max(entryReference, leg.price) : Math.min(entryReference, leg.price);
+        if (!move(s, base, bar.time, from)) return null;
+        const side = opposite(position.side);
+        const qty = Math.min(leg.qty, position.qty);
+        fill(s, localId(s, 'exit', s.fills.length), side, qty, executionPrice(s, base, side, leg.price), base, bar.time, 'Take profit', undefined, leg.id);
+        mark(s, base);
+        const reason = riskReason(s);
+        if (reason) { fail(s, base, bar.time, reason); return null; }
+        from = base;
+    }
+    return from;
+}
 /** OHLC ambiguity is deliberately resolved against the position: protective stops precede targets. */
 function positionBar(s: Session, bar: Bar, entryReference = bar.open): void {
     const p = s.position;
@@ -229,7 +283,9 @@ function positionBar(s: Session, bar: Bar, entryReference = bar.open): void {
         if (reason) fail(s, targetBase, bar.time, reason);
         return;
     }
-    if (!move(s, favorable, bar.time, adverse)) return;
+    const afterTargets = positionTargets(s, bar, entryReference, adverse);
+    if (afterTargets === null || !s.position) return;
+    if (!move(s, favorable, bar.time, afterTargets)) return;
     // A trailing intraday floor must also survive a high-to-low path permitted by this OHLC.
     if (s.config.rules.drawdownType === 'trailing-intraday' && !move(s, adverse, bar.time, favorable)) return;
     move(s, bar.close, bar.time, adverse);
@@ -277,18 +333,23 @@ function processBar(s: Session, bar: Bar): void {
     const p = s.position;
     if (p?.stopLoss !== undefined && (p.side === 'buy' ? bar.open <= p.stopLoss : bar.open >= p.stopLoss)) flatten(s, bar.open, bar.time, 'Stop loss');
     else if (p?.takeProfit !== undefined && (p.side === 'buy' ? bar.open >= p.takeProfit : bar.open <= p.takeProfit)) flatten(s, bar.open, bar.time, 'Take profit', p.takeProfit);
+    else if (positionTargets(s, bar, bar.open, bar.open, true) === null) return;
     mark(s, bar.open);
     const afterBracket = riskReason(s);
     if (afterBracket) { fail(s, bar.open, bar.time, afterBracket); return; }
     const execute = (o: Order, base: number): boolean => {
+        let qty = o.qty;
         if (o.intent) {
             const position = s.position;
             if (!position || position.side === o.side) { o.status = 'cancelled'; return true; }
-            o.qty = o.intent === 'reverse' ? position.qty * 2 : Math.min(o.qty, position.qty);
+            qty = o.intent === 'reverse' ? position.qty * 2 : Math.min(o.qty, position.qty);
         }
-        const net = (s.position ? sign(s.position.side) * s.position.qty : 0) + sign(o.side) * o.qty;
+        try { bracketCompatibility(s, { ...o, qty }); }
+        catch (error) { o.status = 'rejected'; o.rejectReason = error instanceof Error ? error.message : 'Entry bracket no longer fits the position'; return true; }
+        const net = (s.position ? sign(s.position.side) * s.position.qty : 0) + sign(o.side) * qty;
         if (Math.abs(net) > s.config.rules.maxContracts) { o.status = 'rejected'; o.rejectReason = 'Contract limit after earlier executions'; return true; }
         const price = executionPrice(s, base, o.side, o.type === 'limit' ? o.price : undefined);
+        o.qty = qty;
         o.status = 'filled'; o.filledTime = bar.time; o.fillPrice = price;
         fill(s, o.id, o.side, o.qty, price, base, bar.time, o.intent === 'close' ? 'Close position' : o.intent === 'reverse' ? 'Reverse position' : o.type === 'market' ? 'Market order' : `${o.type === 'limit' ? 'Limit' : 'Stop'} order`, o);
         return move(s, base, bar.time, base);
@@ -337,7 +398,7 @@ function advance(s: Session, bars: Bar[], end: number): void {
     }
 }
 function amend(s: Session, command: Extract<Command, { type: 'amend' }>, reference: number | undefined): void {
-    if (command.price === undefined && command.stopLoss === undefined && command.takeProfit === undefined) throw new Error('Amend needs a price or bracket change');
+    if (command.price === undefined && command.stopLoss === undefined && command.takeProfit === undefined && command.takeProfits === undefined) throw new Error('Amend needs a price or bracket change');
     if (command.orderId !== undefined) {
         const order = s.orders.find(o => o.id === id(command.orderId, 'Order ID'));
         if (!order || order.status !== 'working') throw new Error('Only a working order can be amended');
@@ -346,21 +407,32 @@ function amend(s: Session, command: Extract<Command, { type: 'amend' }>, referen
         if (command.price !== undefined) next.price = tickPrice(command.price, s.instrument, 'Order price');
         if (command.stopLoss === null) delete next.stopLoss; else if (command.stopLoss !== undefined) next.stopLoss = tickPrice(command.stopLoss, s.instrument, 'Stop loss');
         if (command.takeProfit === null) delete next.takeProfit; else if (command.takeProfit !== undefined) next.takeProfit = tickPrice(command.takeProfit, s.instrument, 'Take profit');
-        validateDraft(next, s.instrument, reference);
+        if (command.takeProfits === null) delete next.takeProfits;
+        else if (command.takeProfits !== undefined) next.takeProfits = command.takeProfits;
+        const validated = validateDraft(next, s.instrument, reference);
+        bracketCompatibility(s, validated);
         if (next.stopLoss === undefined) delete order.stopLoss;
         if (next.takeProfit === undefined) delete order.takeProfit;
+        if (next.takeProfits === undefined) delete order.takeProfits;
+        else next.takeProfits = validated.takeProfits;
         Object.assign(order, next);
     } else {
         const p = s.position;
         if (!p) throw new Error('There is no open position to amend');
         if (command.price !== undefined) throw new Error('A position entry price cannot be amended');
-        const draft: OrderDraft = { side: p.side, type: 'market', qty: p.qty, stopLoss: p.stopLoss, takeProfit: p.takeProfit };
+        const draft: OrderDraft = { side: p.side, type: 'market', qty: p.qty, stopLoss: p.stopLoss, takeProfit: p.takeProfit,
+            ...(p.takeProfits === undefined ? {} : { takeProfits: p.takeProfits }) };
         if (command.stopLoss === null) delete draft.stopLoss; else if (command.stopLoss !== undefined) draft.stopLoss = tickPrice(command.stopLoss, s.instrument, 'Stop loss');
         if (command.takeProfit === null) delete draft.takeProfit; else if (command.takeProfit !== undefined) draft.takeProfit = tickPrice(command.takeProfit, s.instrument, 'Take profit');
-        validateDraft(draft, s.instrument, reference);
+        if (command.takeProfits === null) delete draft.takeProfits;
+        else if (command.takeProfits !== undefined) draft.takeProfits = command.takeProfits;
+        const validated = validateDraft(draft, s.instrument, reference);
         p.stopLoss = draft.stopLoss; p.takeProfit = draft.takeProfit;
+        if (draft.takeProfits === undefined) delete p.takeProfits;
+        else p.takeProfits = validated.takeProfits;
         if (p.initialRisk === undefined && p.stopLoss !== undefined) p.initialRisk = Math.max(0, (p.avgPrice - p.stopLoss) * sign(p.side) * p.qty * s.instrument.pointValue) || undefined;
     }
+    if (command.takeProfits !== undefined) s.executionVersion = 2;
 }
 
 /** Commands return a new state. A failed validation never partially mutates the supplied session. */
@@ -388,6 +460,8 @@ export function applyCommand(input: Session, bars: Bar[], rawCommand: Command): 
         }
         case 'place': {
             const draft = validateDraft(command.order, s.instrument, reference);
+            bracketCompatibility(s, draft);
+            if (draft.takeProfits !== undefined) s.executionVersion = 2;
             queue(s, draft, time); break;
         }
         case 'cancel': {

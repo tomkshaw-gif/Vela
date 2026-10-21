@@ -4,6 +4,7 @@ import ts from 'typescript';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../client/api';
 import { TradeTicket, tradeTicketMarkup } from '../client/trade-ticket';
+import { mountPartialClose, partialCloseMarkup, readTargetLegs, TargetEditor, targetAllocationError, targetEditorMarkup } from '../client/partial-exit-controls';
 import { escapeHtml } from '../client/util';
 import { createSession } from '../engine';
 import { DEFAULT_RULES, INSTRUMENTS, type Command, type SessionView } from '../shared/types';
@@ -64,8 +65,10 @@ function fixture() {
     const numeric = (id: string): number => Number(value(id));
     const optionalNumber = (id: string): number | undefined => value(id).trim() ? numeric(id) : undefined;
     const download = vi.fn();
-    const Constructor = new Function('$', 'value', 'numeric', 'optionalNumber', 'ApiError', 'esc', 'downloadJson', `${compiled}; return Harness;`)(
-        $, value, numeric, optionalNumber, ApiError, escapeHtml, download) as new () => Harness;
+    const Constructor = new Function('$', 'value', 'numeric', 'optionalNumber', 'ApiError', 'esc', 'downloadJson',
+        'mountPartialClose', 'partialCloseMarkup', 'readTargetLegs', 'TargetEditor', 'targetAllocationError', 'targetEditorMarkup', `${compiled}; return Harness;`)(
+        $, value, numeric, optionalNumber, ApiError, escapeHtml, download,
+        mountPartialClose, partialCloseMarkup, readTargetLegs, TargetEditor, targetAllocationError, targetEditorMarkup) as new () => Harness;
     const harness = new Constructor();
     modal.showModal = () => modal.setAttribute('open', '');
     modal.close = vi.fn(() => { modal.removeAttribute('open'); harness.modalGeneration++; });

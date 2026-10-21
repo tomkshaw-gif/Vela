@@ -23,6 +23,7 @@ import { parseCachedTicker, transformCachedBars } from './series-ticker';
 import { SCRIPT_LIBRARY_LIMITS, ScriptLibrary } from './scripts';
 import { DeepHistoryService, validateDeepHistory } from './deep-history';
 import { appearanceModule } from './appearance';
+import { validateExecutionVersion } from '../engine/validation';
 
 export { ReplayStore, saveDatabentoKey };
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -231,7 +232,8 @@ export async function createReplayServer(options: ServerOptions = {}) {
             }
             if (method === 'POST' && path === '/api/sessions/import') {
                 const input = requireObject(await body(request, 64 * 1024 * 1024));
-                if (input.version !== 1 || Object.keys(input).some(key => !['version', 'session', 'dataset', 'bars'].includes(key))) throw new AppError(400, 'Unsupported session backup.');
+                if ((input.version !== 1 && input.version !== 2) || Object.keys(input).some(key => !['version', 'session', 'dataset', 'bars'].includes(key))) throw new AppError(400, 'Unsupported session backup.');
+                if (validateExecutionVersion(input.session) !== input.version) throw new AppError(400, 'Session backup version does not match its execution data.');
                 const rawMeta = requireObject(input.dataset); const symbol = text(rawMeta.symbol, 'symbol', 16); const inst = instrumentFor(symbol); interval(rawMeta.schema);
                 assertSafeContent(rawMeta, apiKey);
                 if (!['databento', 'csv', 'demo'].includes(String(rawMeta.source))) throw new AppError(400, 'Invalid dataset source.');
@@ -270,27 +272,44 @@ export async function createReplayServer(options: ServerOptions = {}) {
                 if (method === 'GET' && action === 'analytics') { send(response, 200, analytics(session)); return; }
                 if (method === 'POST' && action === 'monte-carlo') { const input = requireObject(await body(request, 4096)); assertSafeContent(input, apiKey); send(response, 200, monteCarlo(session, input)); return; }
                 if (method === 'GET' && action === 'export') {
-                    response.setHeader('Content-Disposition', 'attachment; filename="replay-session.json"'); send(response, 200, { version: 1, session, dataset: store.dataset(session.config.datasetId), bars: store.readBars(session.config.datasetId) }); return;
+                    response.setHeader('Content-Disposition', 'attachment; filename="replay-session.json"'); send(response, 200, { version: validateExecutionVersion(session), session, dataset: store.dataset(session.config.datasetId), bars: store.readBars(session.config.datasetId) }); return;
                 }
-                if (method === 'GET' && action === 'chart') {
-                    if ([...url.searchParams.keys()].some(key => !['timeframe', 'limit', 'after'].includes(key)) || ['timeframe', 'limit', 'after'].some(key => url.searchParams.getAll(key).length > 1)) throw new AppError(400, 'Invalid chart query.');
-                    const timeframe = url.searchParams.get('timeframe') ?? '1m'; const period = parseTimeframe(timeframe); const dataset = store.dataset(session.config.datasetId);
-                    if (!period || !timeframeSupported(timeframe, dataset.schema)) throw new AppError(400, 'Timeframe cannot be finer than the source data.');
-                    const limit = integer(url.searchParams.get('limit') ?? '5000', 1, 5000, 'chart limit');
-                    const rawAfter = url.searchParams.get('after'); const after = rawAfter === null ? undefined : integer(rawAfter, 0, 8_640_000_000_000_000, 'chart cursor');
-                    send(response, 200, store.chart(dataset.id, session.cursor, timeframe, period, limit, after)); return;
-                }
-                if (method === 'GET' && action === 'series') {
-                    const allowed = ['timeframe', 'cursor', 'cutoff', 'from', 'to', 'limit', 'symbol'];
+                if (method === 'GET' && (action === 'chart' || action === 'series')) {
+                    const dataset = store.dataset(session.config.datasetId);
+                    const endIndex = session.config.endIndex ?? dataset.barCount;
+                    let maximumCursor = integer(session.cursor, -1, endIndex - 1, 'saved source cursor');
+                    const rawSnapshot = url.searchParams.get('snapshot');
+                    if (rawSnapshot !== null) {
+                        if (rawSnapshot.length > 1024 || url.searchParams.getAll('snapshot').length !== 1) throw new AppError(400, 'Invalid replay snapshot.');
+                        const snapshot = requireObject(JSON.parse(rawSnapshot));
+                        if (Object.keys(snapshot).length !== 4 || Object.keys(snapshot).some(key => !['cursor', 'revision', 'datasetId', 'checksum'].includes(key))) throw new AppError(400, 'Invalid replay snapshot.');
+                        const cursor = integer(snapshot.cursor, -1, endIndex - 1, 'snapshot cursor');
+                        const revision = integer(snapshot.revision, 0, Number.MAX_SAFE_INTEGER, 'snapshot revision');
+                        if (snapshot.datasetId !== dataset.id || snapshot.checksum !== dataset.checksum || revision > session.revision
+                            || revision === session.revision && cursor !== session.cursor) throw new AppError(409, 'Replay snapshot changed. Reload the session before continuing.', 'SNAPSHOT_CONFLICT');
+                        if (cursor > maximumCursor) throw new AppError(400, 'Replay snapshot cannot advance beyond the saved replay cursor.');
+                        // Older financial views may still read their immutable source prefix.
+                        maximumCursor = cursor;
+                    }
+                    if (action === 'chart') {
+                        const allowed = ['timeframe', 'limit', 'after', 'snapshot'];
+                        if ([...url.searchParams.keys()].some(key => !allowed.includes(key)) || allowed.some(key => url.searchParams.getAll(key).length > 1)) throw new AppError(400, 'Invalid chart query.');
+                        const timeframe = url.searchParams.get('timeframe') ?? '1m'; const period = parseTimeframe(timeframe);
+                        if (!period || !timeframeSupported(timeframe, dataset.schema)) throw new AppError(400, 'Timeframe cannot be finer than the source data.');
+                        const limit = integer(url.searchParams.get('limit') ?? '5000', 1, 5000, 'chart limit');
+                        const rawAfter = url.searchParams.get('after'); const after = rawAfter === null ? undefined : integer(rawAfter, 0, 8_640_000_000_000_000, 'chart cursor');
+                        send(response, 200, store.chart(dataset.id, maximumCursor, timeframe, period, limit, after)); return;
+                    }
+                    const allowed = ['timeframe', 'cursor', 'cutoff', 'from', 'to', 'limit', 'symbol', 'snapshot'];
                     if ([...url.searchParams.keys()].some(key => !allowed.includes(key)) || allowed.some(key => url.searchParams.getAll(key).length > 1) || url.searchParams.has('cursor') === url.searchParams.has('cutoff')) throw new AppError(400, 'Supply either one pinned replay cursor or a source cutoff, and supported series options.');
-                    const timeframe = url.searchParams.get('timeframe') ?? '1'; const period = parseTimeframe(timeframe); const dataset = store.dataset(session.config.datasetId);
+                    const timeframe = url.searchParams.get('timeframe') ?? '1'; const period = parseTimeframe(timeframe);
                     const requestedSymbol = url.searchParams.get('symbol') ?? dataset.symbol;
                     const ticker = parseCachedTicker(requestedSymbol);
                     const primary = ticker.symbol === dataset.symbol;
                     if (!period) throw new AppError(400, 'Invalid script timeframe.');
                     const rawCursor = url.searchParams.get('cursor');
-                    const cursor = url.searchParams.has('cutoff') ? store.pinnedCursor(dataset.id, session.cursor, integer(url.searchParams.get('cutoff'), 0, 8_640_000_000_000_000, 'source cutoff')) : rawCursor === '-1' ? -1 : integer(rawCursor, 0, dataset.barCount - 1, 'source cursor');
-                    if (cursor > session.cursor) throw new AppError(400, 'Script data cannot advance beyond the saved replay cursor.');
+                    const cursor = url.searchParams.has('cutoff') ? store.pinnedCursor(dataset.id, maximumCursor, integer(url.searchParams.get('cutoff'), 0, 8_640_000_000_000_000, 'source cutoff')) : rawCursor === '-1' ? -1 : integer(rawCursor, 0, dataset.barCount - 1, 'source cursor');
+                    if (cursor > maximumCursor) throw new AppError(400, 'Script data cannot advance beyond the replay snapshot cursor.');
                     const limit = integer(url.searchParams.get('limit') ?? '250000', 1, 250000, 'series limit');
                     const from = url.searchParams.has('from') ? integer(url.searchParams.get('from'), 0, 8_640_000_000_000_000, 'series start') : undefined;
                     const to = url.searchParams.has('to') ? integer(url.searchParams.get('to'), 0, 8_640_000_000_000_000, 'series end') : undefined;

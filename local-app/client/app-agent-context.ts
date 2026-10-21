@@ -87,6 +87,9 @@ function pick(value: unknown, fields: readonly string[]): Fields {
     }
     return output;
 }
+function targetProjection(value: unknown): Fields {
+    return Array.isArray(value) ? { takeProfits: value.slice(0, 10).map(leg => pick(leg, ['id', 'price', 'qty'])) } : {};
+}
 function settings(value: unknown): Fields {
     const input = object(value), result: Fields = {};
     for (const key of Object.keys(input).slice(0, APP_CONTEXT_LIMITS.metadata)) {
@@ -159,10 +162,10 @@ export function createAppAgentContext(options: AppAgentContextOptions): AppAgent
                 dataset: pick(view.dataset, ['id', 'name', 'symbol', 'schema', 'intervalMs', 'barCount', 'checksum', 'source']), instrument: pick(session.instrument, ['root', 'tickSize', 'pointValue']),
                 account: pick(session.account, ['balance', 'equity', 'unrealizedPnl', 'netPnl', 'fees', 'peakEquity', 'maxDrawdown']),
                 prop: { state: pick(session.prop, ['status', 'reason', 'dailyLoss', 'drawdownFloor', 'trailingPeak', 'tradingDays', 'bestDayProfit', 'consistencyPct']), rules: pick(session.config.rules, ['profitTargetUsd', 'maxDailyLossUsd', 'maxDrawdownUsd', 'drawdownType', 'drawdownLocksAtInitialBalance', 'minTradingDays', 'maxContracts', 'consistencyPct', 'dayResetTimezone', 'dayResetHour', 'requireFlatToPass']) },
-                position: session.position && visible(session.position.entryTime) ? pick(session.position, ['side', 'qty', 'avgPrice', 'entryTime', 'entryFees', 'stopLoss', 'takeProfit', 'initialRisk', 'mae', 'mfe']) : null,
-                orders: page(session.orders.filter(order => visible(order.createdTime) && (order.filledTime === undefined || visible(order.filledTime))), limit, order => pick(order, ['id', 'side', 'type', 'qty', 'price', 'stopLoss', 'takeProfit', 'intent', 'status', 'createdTime', 'filledTime', 'fillPrice', 'rejectReason']), 0, true),
-                fills: page(session.fills.filter(fill => visible(fill.time)), limit, fill => pick(fill, ['id', 'orderId', 'time', 'side', 'qty', 'price', 'fees', 'reason']), 0, true),
-                trades: page(session.trades.filter(trade => visible(trade.entryTime) && visible(trade.exitTime)), limit, trade => pick(trade, ['id', 'side', 'qty', 'entryTime', 'exitTime', 'entryPrice', 'exitPrice', 'grossPnl', 'fees', 'netPnl', 'reason', 'initialRisk', 'mae', 'mfe']), 0, true),
+                position: session.position && visible(session.position.entryTime) ? { ...pick(session.position, ['side', 'qty', 'avgPrice', 'entryTime', 'entryFees', 'stopLoss', 'takeProfit', 'initialRisk', 'mae', 'mfe']), ...targetProjection(session.position.takeProfits) } : null,
+                orders: page(session.orders.filter(order => visible(order.createdTime) && (order.filledTime === undefined || visible(order.filledTime))), limit, order => ({ ...pick(order, ['id', 'side', 'type', 'qty', 'price', 'stopLoss', 'takeProfit', 'intent', 'status', 'createdTime', 'filledTime', 'fillPrice', 'rejectReason']), ...targetProjection(order.takeProfits) }), 0, true),
+                fills: page(session.fills.filter(fill => visible(fill.time)), limit, fill => pick(fill, ['id', 'orderId', 'time', 'side', 'qty', 'price', 'fees', 'reason', 'takeProfitLegId']), 0, true),
+                trades: page(session.trades.filter(trade => visible(trade.entryTime) && visible(trade.exitTime)), limit, trade => pick(trade, ['id', 'side', 'qty', 'entryTime', 'exitTime', 'entryPrice', 'exitPrice', 'grossPnl', 'fees', 'netPnl', 'reason', 'initialRisk', 'mae', 'mfe', 'takeProfitLegId']), 0, true),
                 bookmarks: page(session.bookmarks.filter(bookmark => visible(bookmark.time)), limit, bookmark => pick(bookmark, ['id', 'time', 'label']), 0, true),
                 equity: page(session.equityCurve.filter(point => visible(point.time)), limit, point => pick(point, ['time', 'balance', 'equity']), 0, true),
             });

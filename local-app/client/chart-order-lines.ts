@@ -1,12 +1,14 @@
 import { registerRendererLayer, type RendererLayerArgs, type RendererLayerInstance } from '../../src/plugin';
-import type { Command, SessionView, Side } from '../shared/types';
+import type { Command, SessionView, Side, TakeProfitLeg } from '../shared/types';
 import type { TicketPriceSelection } from './trade-ticket';
+import { sameTakeProfitLegs } from './partial-exit-controls';
 import './chart-order-lines.css';
 
 export interface ChartOrderLine {
     key: string; price: number; side: Side; text: string; qty: number;
     kind: 'order' | 'position' | 'takeProfit' | 'stopLoss' | 'draft';
     orderId?: string; orderType?: 'limit' | 'stop'; draft?: boolean; entryPrice?: number; signedQty?: boolean;
+    takeProfitLegId?: string; takeProfits?: TakeProfitLeg[]; positionIdentity?: string;
 }
 export interface ChartOrderLineBinding {
     view(): SessionView | null;
@@ -17,6 +19,7 @@ export interface ChartOrderLineBinding {
     command(command: Command, sessionId: string, revision: number): void | Promise<unknown>;
     selectPrice(price: number, type: 'limit' | 'stop'): void;
     selectBracket?(kind: 'takeProfit' | 'stopLoss', price: number | null): void;
+    selectTakeProfits?(legs: TakeProfitLeg[]): void;
     clearPreview?(): void;
 }
 
@@ -26,14 +29,19 @@ const layers = new Set<ChartOrderLinesLayer>();
 export function chartOrderLines(view: SessionView, preview: TicketPriceSelection | null = null): ChartOrderLine[] {
     const { session } = view;
     const lines: ChartOrderLine[] = [];
-    const brackets = (parent: { side: Side; qty: number; takeProfit?: number | null; stopLoss?: number | null }, entryPrice: number,
-        prefix: string, extra: Pick<ChartOrderLine, 'draft' | 'orderId' | 'signedQty'> = {}): void => {
+    const brackets = (parent: { side: Side; qty: number; takeProfit?: number | null; stopLoss?: number | null; takeProfits?: TakeProfitLeg[] }, entryPrice: number,
+        prefix: string, extra: Pick<ChartOrderLine, 'draft' | 'orderId' | 'signedQty' | 'positionIdentity'> = {}): void => {
         for (const kind of ['takeProfit', 'stopLoss'] as const) {
+            if (kind === 'takeProfit' && parent.takeProfits?.length) continue;
             const price = parent[kind];
             if (price !== undefined && price !== null && Number.isFinite(price) && price > 0) lines.push({
                 key: `${prefix}${kind}`, kind, price, entryPrice, side: parent.side, qty: parent.qty, text: kind === 'takeProfit' ? 'TP' : 'SL', ...extra,
             });
         }
+        const targets = parent.takeProfits?.map(leg => ({ ...leg }));
+        for (const [i, leg] of (targets ?? []).entries()) lines.push({ key: `${prefix}takeProfit:${leg.id}`, kind: 'takeProfit',
+            price: leg.price, entryPrice, side: parent.side, qty: leg.qty, text: `TP${i + 1}`,
+            takeProfitLegId: leg.id, takeProfits: targets, ...extra });
     };
     for (const order of session.orders) {
         if (order.status !== 'working' || order.type === 'market' || order.price === undefined) continue;
@@ -43,8 +51,9 @@ export function chartOrderLines(view: SessionView, preview: TicketPriceSelection
     }
     const p = session.position;
     if (p) {
-        lines.push({ key: 'position', kind: 'position', price: p.avgPrice, side: p.side, text: 'Position', qty: p.qty, signedQty: true });
-        brackets(p, p.avgPrice, '', { signedQty: true });
+        const positionIdentity = JSON.stringify([p.side, p.entryTime, p.avgPrice]);
+        lines.push({ key: 'position', kind: 'position', price: p.avgPrice, side: p.side, text: 'Position', qty: p.qty, signedQty: true, positionIdentity });
+        brackets(p, p.avgPrice, '', { signedQty: true, positionIdentity });
     }
     if (preview?.price !== null && preview?.price !== undefined && preview.type !== 'market') {
         const qty = Number.isInteger(preview.qty) && preview.qty! > 0 ? preview.qty! : 0;
@@ -59,6 +68,11 @@ export function orderLineAmendment(line: ChartOrderLine, price: number | null): 
     if (line.draft) return null;
     if (line.kind === 'order' && price !== null) return { type: 'amend', orderId: line.orderId, price };
     const order = line.orderId ? { orderId: line.orderId } : {};
+    if (line.kind === 'takeProfit' && line.takeProfitLegId) {
+        if (!line.takeProfits?.some(leg => leg.id === line.takeProfitLegId)) return null;
+        return { type: 'amend', ...order, takeProfits: line.takeProfits.flatMap(leg => leg.id !== line.takeProfitLegId ? [{ ...leg }]
+            : price === null ? [] : [{ ...leg, price }]) };
+    }
     if (line.kind === 'takeProfit') return { type: 'amend', ...order, takeProfit: price };
     if (line.kind === 'stopLoss') return { type: 'amend', ...order, stopLoss: price };
     return null;
@@ -82,9 +96,10 @@ interface PricePreview {
     addBracket?: 'takeProfit' | 'stopLoss';
 }
 interface Drag extends PricePreview { pointerId: number; target: HTMLElement }
+interface ActionPreview extends PricePreview { target: HTMLButtonElement; action: string; pointerId: number; released: boolean }
 interface OrderLineRow {
     root: HTMLDivElement; label: HTMLButtonElement; badge: HTMLSpanElement; qty: HTMLSpanElement;
-    text: HTMLSpanElement; cancel: HTMLButtonElement; reverse: HTMLButtonElement; takeProfit: HTMLButtonElement; stopLoss: HTMLButtonElement;
+    text: HTMLSpanElement; cancel: HTMLButtonElement; reverse: HTMLButtonElement; partial: HTMLButtonElement; takeProfit: HTMLButtonElement; stopLoss: HTMLButtonElement;
     exits: HTMLSpanElement; price: HTMLSpanElement; minTextWidth: number;
 }
 
@@ -109,6 +124,7 @@ export class ChartOrderLinesLayer implements RendererLayerInstance {
     private args: RendererLayerArgs | null = null;
     private drag: Drag | null = null;
     private pending: PricePreview | null = null;
+    private actionPreview: ActionPreview | null = null;
     private surface: string | null = null;
     private selectedKey: string | null = null;
     private hoveredKey: string | null = null;
@@ -123,30 +139,64 @@ export class ChartOrderLinesLayer implements RendererLayerInstance {
         overlay.className = 'local-chart-orders';
         parent.append(overlay); this.overlay = overlay; layers.add(this);
         const down = (event: PointerEvent): void => {
-            if ((event.target as Element).closest('[data-order-close],[data-order-reverse]')) { event.stopPropagation(); this.rollback(); return; }
+            this.actionPreview = null;
+            const action = (event.target as Element).closest<HTMLButtonElement>('[data-order-partial],[data-order-edit-targets],[data-order-close],[data-order-reverse]');
+            if (action) {
+                const binding = this.binding(); const view = binding?.view();
+                const key = action.dataset.orderPartial ?? action.dataset.orderEditTargets ?? action.dataset.orderClose ?? action.dataset.orderReverse;
+                const line = view && binding ? chartOrderLines(view, binding.preview()).find(line => line.key === key) : undefined;
+                if (!action.disabled && binding && view && line && this.editable(binding, view)) this.actionPreview = {
+                    line, price: line.price, sessionId: view.session.id, revision: view.session.revision, cursor: view.session.cursor, binding,
+                    target: action, action: this.actionName(action), pointerId: event.pointerId, released: false,
+                };
+            }
+            if ((event.target as Element).closest('[data-order-close],[data-order-reverse],[data-order-partial],[data-order-edit-targets]')) { event.stopPropagation(); this.rollback(); return; }
             this.start(event);
         };
         const move = (event: PointerEvent): void => this.move(event);
         const up = (event: PointerEvent): void => {
-            if ((event.target as Element).closest('[data-order-close],[data-order-reverse]')) { event.stopPropagation(); return; }
+            if (this.actionPreview?.pointerId === event.pointerId) this.actionPreview.released = true;
+            if ((event.target as Element).closest('[data-order-close],[data-order-reverse],[data-order-partial],[data-order-edit-targets]')) { event.stopPropagation(); return; }
             this.finish(event);
         };
         const cancel = (event: PointerEvent): void => {
+            // Normal capture release follows pointerup but precedes its guarded click.
+            if (this.actionPreview?.pointerId === event.pointerId && (event.type === 'pointercancel' || !this.actionPreview.released)) this.actionPreview = null;
             if (this.drag?.pointerId === event.pointerId) this.rollback();
         };
         const click = (event: MouseEvent): void => {
-            const target = (event.target as Element).closest<HTMLButtonElement>('[data-order-close],[data-order-reverse]');
+            const target = (event.target as Element).closest<HTMLButtonElement>('[data-order-close],[data-order-reverse],[data-order-partial],[data-order-edit-targets]');
             if (!target) return;
             event.stopPropagation(); event.preventDefault();
             const binding = this.binding(); const view = binding?.view();
-            if (target.disabled || !binding || !view || !this.editable(binding, view)) return;
-            const line = chartOrderLines(view, binding.preview()).find(item => item.key === (target.dataset.orderClose ?? target.dataset.orderReverse));
+            if (target.disabled || this.pending || !binding || !view || !this.editable(binding, view)) return;
+            const line = chartOrderLines(view, binding.preview()).find(item => item.key === (target.dataset.orderClose ?? target.dataset.orderReverse ?? target.dataset.orderPartial ?? target.dataset.orderEditTargets));
             if (!line) return;
-            if (line.kind === 'position') binding.command({ type: target.dataset.orderReverse ? 'reverse' : 'close' }, view.session.id, view.session.revision);
+            const activation = this.actionPreview; this.actionPreview = null;
+            if (activation && (activation.target !== target || activation.action !== this.actionName(target)
+                || activation.line.key !== line.key || !this.samePreviewState(activation, binding, view))) return;
+            if (target.dataset.orderEditTargets) {
+                const p = view.session.position;
+                const order = line.orderId ? view.session.orders.find(item => item.id === line.orderId && item.status === 'working') : undefined;
+                const owner = order ? { orderId: order.id, qty: order.qty, side: order.side, createdTime: order.createdTime }
+                    : line.kind === 'position' && p ? { entryTime: p.entryTime, side: p.side, qty: p.qty, avgPrice: p.avgPrice } : null;
+                if (owner) overlay.dispatchEvent(new CustomEvent('local-replay:chart-edit-exits', { bubbles: true,
+                    detail: { sessionId: view.session.id, revision: view.session.revision, cursor: view.session.cursor, ...owner } }));
+                return;
+            }
+            if (target.dataset.orderPartial) {
+                const p = view.session.position;
+                if (line.kind !== 'position' || !p) return;
+                overlay.dispatchEvent(new CustomEvent('local-replay:chart-partial-close', { bubbles: true,
+                    detail: { sessionId: view.session.id, revision: view.session.revision, cursor: view.session.cursor,
+                        entryTime: p.entryTime, side: p.side, qty: p.qty, avgPrice: p.avgPrice } }));
+            }
+            else if (line.kind === 'position') binding.command({ type: target.dataset.orderReverse ? 'reverse' : 'close' }, view.session.id, view.session.revision);
             else if (line.kind === 'order') binding.command({ type: 'cancel', orderId: line.orderId! }, view.session.id, view.session.revision);
             else if (line.kind === 'draft') binding.clearPreview?.();
             else if (line.kind === 'takeProfit' || line.kind === 'stopLoss') {
-                if (line.draft) binding.selectBracket?.(line.kind, null);
+                if (line.draft && line.takeProfitLegId) binding.selectTakeProfits?.(line.takeProfits!.filter(leg => leg.id !== line.takeProfitLegId).map(leg => ({ ...leg })));
+                else if (line.draft) binding.selectBracket?.(line.kind, null);
                 else {
                     const command = orderLineAmendment(line, null);
                     if (command) binding.command(command, view.session.id, view.session.revision);
@@ -154,6 +204,10 @@ export class ChartOrderLinesLayer implements RendererLayerInstance {
             }
         };
         const key = (event: KeyboardEvent): void => {
+            if (!event.repeat && (event.key === 'Enter' || event.key === ' ')) {
+                const action = (event.target as Element).closest<HTMLButtonElement>('[data-order-close],[data-order-reverse],[data-order-partial],[data-order-edit-targets]');
+                if (action && !action.disabled) this.actionPreview = null;
+            }
             if (event.key === 'Escape' && this.drag) { event.preventDefault(); event.stopPropagation(); this.rollback(); }
         };
         const lineKey = (target: EventTarget | null): string | null => target instanceof overlay.ownerDocument.defaultView!.Element
@@ -226,6 +280,9 @@ export class ChartOrderLinesLayer implements RendererLayerInstance {
                 const reverse = overlay.ownerDocument.createElement('button'); reverse.type = 'button'; reverse.className = 'local-order-reverse';
                 reverse.dataset.orderReverse = line.key; reverse.textContent = '\u21c4';
                 reverse.setAttribute('aria-label', 'Reverse simulated position on the next source bar');
+                const partial = overlay.ownerDocument.createElement('button'); partial.type = 'button'; partial.className = 'local-order-partial';
+                partial.dataset.orderPartial = line.key; partial.textContent = '%';
+                partial.setAttribute('aria-label', 'Partially close simulated position'); partial.title = 'Close part of the remaining position';
                 const addExit = (kind: 'takeProfit' | 'stopLoss'): HTMLButtonElement => {
                     const button = overlay.ownerDocument.createElement('button'); button.type = 'button'; button.className = 'local-order-add-exit';
                     button.dataset.orderAddExit = kind; button.textContent = kind === 'takeProfit' ? 'TP' : 'SL';
@@ -234,9 +291,9 @@ export class ChartOrderLinesLayer implements RendererLayerInstance {
                 };
                 const takeProfit = addExit('takeProfit'), stopLoss = addExit('stopLoss');
                 const exits = overlay.ownerDocument.createElement('span'); exits.className = 'local-order-add-exits'; exits.append(takeProfit, stopLoss);
-                body.append(label, reverse, cancel); root.append(badge, exits, body);
+                body.append(label, partial, reverse, cancel); root.append(badge, exits, body);
                 const axisPrice = overlay.ownerDocument.createElement('span'); axisPrice.className = 'local-order-axis-price'; axisPrice.dataset.orderPrice = line.key;
-                overlay.append(root, axisPrice); row = { root, label, badge, qty, text, cancel, reverse, takeProfit, stopLoss, exits, price: axisPrice, minTextWidth: 0 }; this.rows.set(line.key, row);
+                overlay.append(root, axisPrice); row = { root, label, badge, qty, text, cancel, reverse, partial, takeProfit, stopLoss, exits, price: axisPrice, minTextWidth: 0 }; this.rows.set(line.key, row);
             }
             row.root.hidden = !Number.isFinite(y) || y < args.bounds.top || y > args.bounds.top + args.bounds.height;
             row.root.dataset.kind = line.kind; row.root.dataset.side = line.side; row.root.dataset.moving = String(moving !== null);
@@ -250,7 +307,7 @@ export class ChartOrderLinesLayer implements RendererLayerInstance {
             row.badge.hidden = line.kind !== 'draft' && line.kind !== 'order'; row.badge.textContent = line.side === 'buy' ? 'Buy' : 'Sell';
             row.qty.textContent = line.key.startsWith('projection:') ? line.text : line.qty ? `${line.signedQty && line.side === 'sell' ? '\u2212' : ''}${line.qty}` : '—';
             const pnl = linePnl(line, price, view);
-            row.text.textContent = pnl === null ? line.text : money(pnl);
+            row.text.textContent = pnl === null ? line.text : `${line.takeProfitLegId ? `${line.text} · ` : ''}${money(pnl)}`;
             if (context && typeof context.measureText === 'function') {
                 row.qty.style.width = `${Math.max(19, Math.ceil(context.measureText(row.qty.textContent).width) + 14)}px`;
                 row.minTextWidth = Math.max(row.minTextWidth, Math.ceil(context.measureText(row.text.textContent).width) + Math.ceil(context.measureText('0').width));
@@ -258,20 +315,30 @@ export class ChartOrderLinesLayer implements RendererLayerInstance {
             }
             row.text.dataset.profit = pnl === null ? '' : pnl < 0 ? 'negative' : 'positive';
             row.label.setAttribute('aria-label', `${line.kind === 'position' ? '' : 'Drag '}${line.text.toLowerCase()} at ${price.toFixed(decimals)}`);
-            const editableDraft = !line.draft || line.kind === 'draft' || !!binding.selectBracket;
+            const editableDraft = !line.draft || line.kind === 'draft' || (line.takeProfitLegId ? !!binding.selectTakeProfits : !!binding.selectBracket);
             row.label.disabled = !enabled || line.kind === 'position' || !editableDraft;
             row.reverse.hidden = line.kind !== 'position'; row.reverse.disabled = !enabled;
+            row.partial.hidden = line.kind !== 'position'; row.partial.disabled = !enabled;
             const exitParent = this.exitParent(line, binding, view);
             for (const kind of ['takeProfit', 'stopLoss'] as const) {
-                row[kind].hidden = !exitParent || exitParent[kind] != null || line.draft && !binding.selectBracket
-                    || projection?.line.key === line.key && projection?.addBracket === kind && this.drag?.addBracket !== kind;
+                const editTargets = kind === 'takeProfit' && !!exitParent?.takeProfits?.length && !line.draft;
+                row[kind].hidden = !editTargets && (!exitParent || exitParent[kind] != null || kind === 'takeProfit' && !!exitParent.takeProfits?.length || line.draft && !binding.selectBracket
+                    || projection?.line.key === line.key && projection?.addBracket === kind && this.drag?.addBracket !== kind);
+                if (editTargets) {
+                    row[kind].dataset.orderEditTargets = line.key;
+                    row[kind].setAttribute('aria-label', 'Edit partial take-profit targets'); row[kind].title = 'Edit partial take-profit targets';
+                } else {
+                    delete row[kind].dataset.orderEditTargets;
+                    row[kind].setAttribute('aria-label', `Drag to add ${kind === 'takeProfit' ? 'take profit' : 'stop loss'} to ${line.kind === 'position' ? 'simulated position' : line.kind === 'draft' ? 'draft order' : 'working order'}`);
+                    row[kind].title = row[kind].getAttribute('aria-label')!;
+                }
                 row[kind].disabled = !enabled;
             }
             row.exits.hidden = row.takeProfit.hidden && row.stopLoss.hidden;
-            row.cancel.hidden = line.key.startsWith('projection:') || line.kind === 'draft' && !binding.clearPreview || !!line.draft && line.kind !== 'draft' && !binding.selectBracket;
+            row.cancel.hidden = line.key.startsWith('projection:') || line.kind === 'draft' && !binding.clearPreview || !!line.draft && line.kind !== 'draft' && !editableDraft;
             row.cancel.disabled = !enabled;
             row.cancel.setAttribute('aria-label', line.kind === 'position' ? 'Close simulated position on the next source bar' : line.kind === 'order' ? `Cancel ${line.text.toLowerCase()} order`
-                : line.kind === 'draft' ? 'Clear draft entry price' : `Remove ${line.kind === 'takeProfit' ? 'take profit' : 'stop loss'}${line.draft ? ' from draft' : ''}`);
+                : line.kind === 'draft' ? 'Clear draft entry price' : `Remove ${line.takeProfitLegId ? `${line.text} target` : line.kind === 'takeProfit' ? 'take profit' : 'stop loss'}${line.draft ? ' from draft' : ''}`);
             if (line.kind === 'order') row.cancel.dataset.orderCancel = line.orderId; else delete row.cancel.dataset.orderCancel;
             row.price.hidden = row.root.hidden; row.price.textContent = price.toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
             row.price.style.left = `${args.coords.width}px`; row.price.style.top = `${y}px`;
@@ -288,7 +355,7 @@ export class ChartOrderLinesLayer implements RendererLayerInstance {
     destroy(): void {
         this.releaseDrag(); for (const dispose of this.disposers.splice(0)) dispose();
         this.overlay?.remove(); this.overlay = null; this.canvas = null; this.args = null; this.surface = null;
-        this.pending = null; this.selectedKey = null; this.hoveredKey = null; this.rows.clear(); layers.delete(this);
+        this.pending = null; this.actionPreview = null; this.selectedKey = null; this.hoveredKey = null; this.rows.clear(); layers.delete(this);
     }
 
     private binding(): ChartOrderLineBinding | null {
@@ -298,7 +365,7 @@ export class ChartOrderLinesLayer implements RendererLayerInstance {
     private editable(binding: ChartOrderLineBinding, view: SessionView): boolean {
         return binding.current() && !binding.blocked() && view.session.status === 'paused' && view.session.cursor >= 0;
     }
-    private exitParent(line: ChartOrderLine, binding: ChartOrderLineBinding, view: SessionView): { takeProfit?: number | null; stopLoss?: number | null } | null {
+    private exitParent(line: ChartOrderLine, binding: ChartOrderLineBinding, view: SessionView): { takeProfit?: number | null; stopLoss?: number | null; takeProfits?: TakeProfitLeg[] } | null {
         if (line.kind === 'position') return view.session.position;
         if (line.kind === 'draft') return binding.preview();
         if (line.kind === 'order') return view.session.orders.find(order => order.id === line.orderId && order.status === 'working') ?? null;
@@ -307,6 +374,10 @@ export class ChartOrderLinesLayer implements RendererLayerInstance {
     private priority(line: ChartOrderLine): number {
         return this.previewKey(this.drag) === line.key || this.previewKey(this.pending) === line.key ? 4 : this.hoveredKey === line.key ? 3 : this.selectedKey === line.key ? 2
             : line.kind === 'takeProfit' || line.kind === 'stopLoss' ? 0 : 1;
+    }
+    private actionName(target: HTMLElement): string {
+        return target.hasAttribute('data-order-partial') ? 'partial' : target.hasAttribute('data-order-edit-targets') ? 'edit-targets'
+            : target.hasAttribute('data-order-reverse') ? 'reverse' : 'close';
     }
     private previewKey(preview: PricePreview | null): string | undefined { return preview?.addBracket ? `projection:${preview.addBracket}` : preview?.line.key; }
     private sameDragState(drag: Drag, binding: ChartOrderLineBinding, view: SessionView): boolean {
@@ -317,7 +388,9 @@ export class ChartOrderLinesLayer implements RendererLayerInstance {
             && drag.revision === view.session.revision && drag.cursor === view.session.cursor
             && chartOrderLines(view, binding.preview()).some(line => line.key === drag.line.key && line.price === drag.line.price
                 && line.side === drag.line.side && line.qty === drag.line.qty && line.entryPrice === drag.line.entryPrice && line.orderType === drag.line.orderType
-                && (!drag.addBracket || this.exitParent(line, binding, view)?.[drag.addBracket] == null));
+                && line.positionIdentity === drag.line.positionIdentity && sameTakeProfitLegs(line.takeProfits, drag.line.takeProfits)
+                && (!drag.addBracket || this.exitParent(line, binding, view)?.[drag.addBracket] == null
+                    && (drag.addBracket !== 'takeProfit' || !this.exitParent(line, binding, view)?.takeProfits?.length)));
     }
     private start(event: PointerEvent): void {
         if (event.button !== 0 || this.drag || this.pending) return;
@@ -332,7 +405,7 @@ export class ChartOrderLinesLayer implements RendererLayerInstance {
         const line = chartOrderLines(view, binding.preview()).find(item => item.key === (addBracket ? parentKey : target.dataset.orderDrag));
         if (!line || line.key.startsWith('projection:') || line.kind === 'position' && !addBracket) return;
         const exitParent = this.exitParent(line, binding, view);
-        if (addBracket && (!exitParent || exitParent[addBracket] != null || line.draft && !binding.selectBracket)) return;
+        if (addBracket && (!exitParent || exitParent[addBracket] != null || addBracket === 'takeProfit' && exitParent.takeProfits?.length || line.draft && !binding.selectBracket)) return;
         event.preventDefault(); event.stopPropagation();
         this.drag = { pointerId: event.pointerId, line, price: line.price, sessionId: view.session.id, revision: view.session.revision,
             cursor: view.session.cursor, binding, target, ...(addBracket ? { addBracket } : {}) };
@@ -362,7 +435,10 @@ export class ChartOrderLinesLayer implements RendererLayerInstance {
         if (drag.addBracket && drag.line.draft) { this.releaseDrag(); binding.selectBracket?.(drag.addBracket, drag.price); this.repaint(); }
         else if (drag.line.kind === 'draft') { this.releaseDrag(); binding.selectPrice(drag.price, drag.line.orderType ?? 'limit'); this.repaint(); }
         else if (drag.line.draft && (drag.line.kind === 'takeProfit' || drag.line.kind === 'stopLoss')) {
-            this.releaseDrag(); binding.selectBracket?.(drag.line.kind, drag.price); this.repaint();
+            this.releaseDrag();
+            if (drag.line.takeProfitLegId) binding.selectTakeProfits?.(drag.line.takeProfits!.map(leg => ({ ...leg, ...(leg.id === drag.line.takeProfitLegId ? { price: drag.price } : {}) })));
+            else binding.selectBracket?.(drag.line.kind, drag.price);
+            this.repaint();
         }
         else {
             const command: Command | null = drag.addBracket ? { type: 'amend', ...(drag.line.orderId ? { orderId: drag.line.orderId } : {}), [drag.addBracket]: drag.price } : orderLineAmendment(drag.line, drag.price);

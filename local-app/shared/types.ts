@@ -40,9 +40,10 @@ export type SessionCreateConfig = (
 export interface SessionNavigation {
     currentIndex: number; currentTime: number | null; targetIndex: number; targetTime: number;
 }
+export interface TakeProfitLeg { id: string; price: number; qty: number }
 export interface OrderDraft {
     side: Side; type: 'market' | 'limit' | 'stop'; qty: number;
-    price?: number; stopLoss?: number; takeProfit?: number;
+    price?: number; stopLoss?: number; takeProfit?: number; takeProfits?: TakeProfitLeg[];
 }
 export interface Order extends OrderDraft {
     intent?: 'close' | 'reverse';
@@ -51,16 +52,16 @@ export interface Order extends OrderDraft {
 }
 export interface Position {
     side: Side; qty: number; avgPrice: number; entryTime: number; entryFees: number;
-    stopLoss?: number; takeProfit?: number; initialRisk?: number; mae: number; mfe: number;
+    stopLoss?: number; takeProfit?: number; takeProfits?: TakeProfitLeg[]; initialRisk?: number; mae: number; mfe: number;
 }
 export interface Fill {
     id: string; orderId: string; time: number; side: Side; qty: number; price: number;
-    fees: number; reason: string;
+    fees: number; reason: string; takeProfitLegId?: string;
 }
 export interface Trade {
     id: string; side: Side; qty: number; entryTime: number; exitTime: number;
     entryPrice: number; exitPrice: number; grossPnl: number; fees: number; netPnl: number;
-    reason: string; initialRisk?: number; mae: number; mfe: number;
+    reason: string; initialRisk?: number; mae: number; mfe: number; takeProfitLegId?: string;
 }
 export interface EquityPoint { time: number; balance: number; equity: number }
 export interface DayStat {
@@ -78,6 +79,8 @@ export interface PropState {
 }
 export interface Bookmark { id: string; time: number; label: string }
 export interface Session {
+    /** Absent for legacy executions; retained once target legs or their provenance are used. */
+    executionVersion?: 2;
     id: string; config: SessionConfig; instrument: Instrument; cursor: number;
     status: 'paused' | 'completed' | 'passed' | 'failed'; revision: number;
     createdAt: string; updatedAt: string; account: Account; position: Position | null;
@@ -91,7 +94,7 @@ export type Command =
     | { type: 'cancel'; orderId: string }
     | { type: 'close'; qty?: number }
     | { type: 'reverse' }
-    | { type: 'amend'; orderId?: string; price?: number; stopLoss?: number | null; takeProfit?: number | null }
+    | { type: 'amend'; orderId?: string; price?: number; stopLoss?: number | null; takeProfit?: number | null; takeProfits?: TakeProfitLeg[] | null }
     | { type: 'bookmark'; label: string }
     | { type: 'layout'; layout: unknown }
     | { type: 'rename'; name: string };
