@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as replayTime from '../client/replay-time';
+import { mountDateTimePickers, type DateTimePickers } from '../client/date-time-picker';
 import { escapeHtml, utc } from '../client/util';
 import { createSession, validateSessionConfig } from '../engine';
 import { DEFAULT_RULES, INSTRUMENTS, type SessionCreateConfig, type SessionView } from '../shared/types';
@@ -12,7 +13,7 @@ const source = ts.createSourceFile('main.ts', readFileSync('local-app/client/mai
 const studio = source.statements.find(node => ts.isClassDeclaration(node) && node.name?.text === 'ReplayStudio');
 if (!studio || !ts.isClassDeclaration(studio)) throw new Error('ReplayStudio is missing.');
 const names = ['submit', 'createSession', 'showDialog', 'newSessionDialog', 'zoneOptions', 'applyPreset', 'updateStartTime',
-    'updateTimeOccurrences', 'readReplayTime', 'timeOffsetMarkup', 'replayTimeChanged', 'error'];
+    'updateTimeOccurrences', 'readReplayTime', 'timeOffsetMarkup', 'replayTimeChanged', 'error', 'mountReplayTimePickers'];
 const methods = names.map(name => {
     const method = studio.members.find(member => ts.isMethodDeclaration(member) && member.name.getText(source) === name);
     if (!method) throw new Error(`ReplayStudio.${name} is missing.`);
@@ -25,6 +26,7 @@ const compiled = ts.transpileModule(`class Harness { ${methods.join('\n')} }`, {
 interface Harness {
     view: SessionView | null; sessionGeneration: number; modalGeneration: number;
     navigationGeneration: number;
+    dateTimePickers?: DateTimePickers;
     newSessionDialog(mode?: 'chart' | 'backtest'): void; showDialog(title: string, body: string): void;
     replayTimeChanged(target: HTMLInputElement | HTMLSelectElement): void;
     submit(form: HTMLFormElement): Promise<void>;
@@ -35,7 +37,8 @@ function deferred<T>() {
     const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
     return { promise, resolve, reject };
 }
-afterEach(() => { document.body.replaceChildren(); vi.restoreAllMocks(); });
+const cleanups: (() => void)[] = [];
+afterEach(() => { cleanups.splice(0).forEach(cleanup => cleanup()); document.body.replaceChildren(); vi.restoreAllMocks(); });
 
 function fixture() {
     document.body.innerHTML = '<dialog id="modal"><div id="modal-content"></div></dialog>';
@@ -52,9 +55,10 @@ function fixture() {
     const value = (id: string): string => ($(`#${id}`) as HTMLInputElement).value;
     const numeric = (id: string): number => Number(value(id));
     const optionalNumber = (id: string): number | undefined => value(id).trim() ? numeric(id) : undefined;
-    const dependencies = { ...replayTime, $, value, numeric, optionalNumber, esc: escapeHtml, utc, DEFAULT_RULES };
+    const dependencies = { ...replayTime, mountDateTimePickers, $, value, numeric, optionalNumber, esc: escapeHtml, utc, DEFAULT_RULES };
     const Constructor = new Function(...Object.keys(dependencies), `${compiled}; return Harness;`)(...Object.values(dependencies)) as new () => Harness;
     const harness = new Constructor(); const pending = deferred<SessionView>();
+    cleanups.push(() => harness.dateTimePickers?.destroy());
     const post = vi.fn((_path: string, _config: SessionCreateConfig) => pending.promise); const refreshIndex = vi.fn(async (): Promise<void> => undefined);
     const openSession = vi.fn(async (_id: string | undefined): Promise<void> => undefined); const toast = vi.fn();
     const action = vi.fn(async (_action: string, data: DOMStringMap) => { await openSession(data.id); });
@@ -151,6 +155,48 @@ describe('session mode validation and configuration', () => {
 });
 
 describe('session creation completion ownership', () => {
+    it.each(['request', 'refresh'] as const)('preserves an unapplied picker draft opened during the pending %s', async phase => {
+        const f = fixture(); const form = f.form(); const refreshing = deferred<void>();
+        if (phase === 'refresh') f.refreshIndex.mockImplementation(() => refreshing.promise);
+        const task = f.submit();
+        if (phase === 'refresh') { f.pending.resolve(f.created); await vi.waitFor(() => expect(f.refreshIndex).toHaveBeenCalledOnce()); }
+        const trigger = form.querySelector<HTMLButtonElement>('[data-date-time-trigger="new-start-time"]')!; trigger.click();
+        const popup = form.querySelector<HTMLElement>('.date-time-picker')!;
+        const draft = popup.querySelector<HTMLInputElement>('[data-draft-time]')!;
+        draft.value = '05:10:18'; draft.dispatchEvent(new Event('input', { bubbles: true }));
+        expect(f.field('new-start-time').value).toBe('2026-11-01T04:00');
+        if (phase === 'request') f.pending.resolve(f.created); else refreshing.resolve();
+        await task;
+        expect(f.refreshIndex).toHaveBeenCalledOnce(); expect(f.action).not.toHaveBeenCalled(); expect(f.openSession).not.toHaveBeenCalled();
+        expect(f.modal.open).toBe(true); expect(f.form()).toBe(form); expect(popup.hidden).toBe(false);
+        expect(draft.isConnected).toBe(true); expect(draft.value).toBe('05:10:18'); expect(trigger.getAttribute('aria-expanded')).toBe('true');
+        expect(form.querySelector<HTMLButtonElement>('button.primary')!.disabled).toBe(false);
+        expect(f.toast).toHaveBeenCalledWith(expect.stringMatching(/created.*saved sessions/i));
+    });
+
+    it('retires the original creation after a later picker draft is explicitly cancelled', async () => {
+        const f = fixture(); const task = f.submit();
+        f.form().querySelector<HTMLButtonElement>('[data-date-time-trigger="new-start-time"]')!.click();
+        const draft = f.form().querySelector<HTMLInputElement>('[data-draft-time]')!;
+        draft.value = '05:10:18'; draft.dispatchEvent(new Event('input', { bubbles: true }));
+        f.form().querySelector<HTMLButtonElement>('[data-picker-cancel]')!.click();
+        f.pending.resolve(f.created); await task;
+        expect(f.modal.open).toBe(false); expect(f.refreshIndex).toHaveBeenCalledOnce();
+        expect(f.action).toHaveBeenCalledExactlyOnceWith('open-session', { id: f.created.session.id });
+    });
+
+    it('preserves a later picker Apply through the existing canonical-field ownership check', async () => {
+        const f = fixture(); const task = f.submit();
+        f.form().querySelector<HTMLButtonElement>('[data-date-time-trigger="new-start-time"]')!.click();
+        const draft = f.form().querySelector<HTMLInputElement>('[data-draft-time]')!;
+        draft.value = '05:10:18'; draft.dispatchEvent(new Event('input', { bubbles: true }));
+        f.form().querySelector<HTMLButtonElement>('[data-picker-apply]')!.click();
+        const edited = f.field('new-start-time').value; expect(edited).not.toBe('2026-11-01T04:00');
+        f.pending.resolve(f.created); await task;
+        expect(f.modal.open).toBe(true); expect(f.action).not.toHaveBeenCalled(); expect(f.openSession).not.toHaveBeenCalled();
+        expect(f.field('new-start-time').value).toBe(edited); expect(f.refreshIndex).toHaveBeenCalledOnce();
+    });
+
     it('refreshes saved sessions after a cancelled creation without retiring a replacement form or switching context', async () => {
         const f = fixture(); const submitted = f.form(); const task = f.submit();
         expect(f.post).toHaveBeenCalledExactlyOnceWith('/api/sessions', expect.objectContaining({ name: 'Submitted session' }));

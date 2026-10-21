@@ -10,6 +10,7 @@ import { runInNewContext } from 'node:vm';
 const require = createRequire(import.meta.url);
 const { CHANNELS, createPrepareController, createQuitLifecycle, isTrustedPage } = require('../electron/lifecycle.cjs');
 const { configureProfile, startBackend, runtimeDirectory, secureWindow, runDesktop } = require('../electron/main.cjs');
+const { UPDATE_CHANNELS } = require('../electron/updates.cjs');
 const ORIGIN = 'http://127.0.0.1:5196';
 const ID = '11111111-1111-4111-8111-111111111111';
 const directories: string[] = [];
@@ -28,7 +29,8 @@ function fixture() {
         isDestroyed: () => false, send: vi.fn(), setWindowOpenHandler: vi.fn(),
         session: { setPermissionRequestHandler: vi.fn(), setPermissionCheckHandler: vi.fn() } });
     const window = Object.assign(new EventEmitter(), { webContents: contents, isDestroyed: () => false });
-    const ipcMain = new EventEmitter();
+    const handlers = new Map();
+    const ipcMain = Object.assign(new EventEmitter(), { handle: (channel: string, handler: unknown) => handlers.set(channel, handler), removeHandler: (channel: string) => handlers.delete(channel) });
     const event = { sender: contents, senderFrame: frame };
     return { window, contents, ipcMain, event, frame };
 }
@@ -62,12 +64,13 @@ async function desktop(loadFails = false, updaterFails = false) {
     const BrowserWindow = vi.fn(function () { return window; });
     const dialog = { showMessageBox: vi.fn(async () => ({})), showErrorBox: vi.fn() };
     const updater = { check: vi.fn(async () => null), install: vi.fn(), dispose: vi.fn() };
-    const createUpdater = vi.fn((_hooks: { onDownloaded: () => void }) => { if (updaterFails) throw new Error('Missing updater.'); return updater; });
+    const createUpdater = vi.fn((_hooks: { onDownloaded: (version?: string) => void }) => { if (updaterFails) throw new Error('Missing updater.'); return updater; });
     const Menu = { buildFromTemplate: vi.fn((template: { label?: string; submenu?: { label?: string; click?: () => void }[] }[]) => template), setApplicationMenu: vi.fn() };
     const result = await runDesktop({ app, BrowserWindow, utilityProcess: { fork: () => {
         queueMicrotask(() => child.emit('message', { type: 'backend:ready', url: ORIGIN, node: '24.22.0', sqlite: true })); return child;
     } }, ipcMain: f.ipcMain, dialog, Menu }, { createUpdater, environment: { VELA_DATA_DIR: root } });
     disposers.push(() => app.emit('will-quit'));
+    f.contents.send.mockClear();
     return { ...f, window, app, root, BrowserWindow, child, dialog, updater, createUpdater, Menu, result };
 }
 
@@ -224,7 +227,7 @@ describe('Electron utility supervision and window policy', () => {
 
 describe('sandboxed preload contract', () => {
     function preload(mainFrame = true) {
-        const ipc = Object.assign(new EventEmitter(), { send: vi.fn() }); let exposed: { onPrepare: (cb: (value: { requestId: string; reason: string }) => void) => () => void; prepared: (requestId: string, error?: string) => void } | undefined;
+        const ipc = Object.assign(new EventEmitter(), { send: vi.fn(), invoke: vi.fn() }); let exposed: { onPrepare: (cb: (value: { requestId: string; reason: string }) => void) => () => void; prepared: (requestId: string, error?: string) => void } | undefined;
         runInNewContext(readFileSync(resolve('local-app/electron/preload.cjs'), 'utf8'), {
             require: (name: string) => { expect(name).toBe('electron'); return { ipcRenderer: ipc, contextBridge: { exposeInMainWorld: (name: string, api: typeof exposed) => { expect(name).toBe('velaDesktop'); exposed = api; } } }; },
             process: { isMainFrame: mainFrame },
@@ -232,7 +235,7 @@ describe('sandboxed preload contract', () => {
         return { ipc, api: exposed! };
     }
     it('exposes only typed save operations, queues early requests, and never exposes IPC events or raw errors', () => {
-        const { ipc, api } = preload(); expect(Object.keys(api).sort()).toEqual(['onPrepare', 'prepared']);
+        const { ipc, api } = preload(); expect(Object.keys(api).sort()).toEqual(['checkForUpdates', 'getUpdateState', 'installUpdate', 'onPrepare', 'onUpdateState', 'prepared']);
         ipc.emit(CHANNELS.prepare, { secret: 'not exposed' }, { requestId: ID, reason: 'update' });
         const callback = vi.fn(); const off = api.onPrepare(callback); expect(callback).toHaveBeenCalledExactlyOnceWith({ requestId: ID, reason: 'update' });
         api.prepared('stale'); expect(ipc.send).not.toHaveBeenCalled();
@@ -271,15 +274,27 @@ describe('desktop entry integration', () => {
         file.submenu!.find(item => item.label?.startsWith('Check'))!.click!();
         await vi.waitFor(() => expect(f.updater.check).toHaveBeenCalledOnce());
     });
-    it('routes automatic downloads through renderer ACK and actual utility exit before invoking the updater', async () => {
+    it('keeps a downloaded update idle until the explicit menu action passes renderer ACK and actual utility exit', async () => {
         const f = await desktop(); f.createUpdater.mock.calls[0]![0].onDownloaded();
-        await vi.waitFor(() => expect(f.contents.send).toHaveBeenCalledOnce());
+        await Promise.resolve(); await Promise.resolve();
+        expect(f.contents.send.mock.calls.every(call => call[0] === UPDATE_CHANNELS.changed)).toBe(true);
+        expect(f.child.postMessage).not.toHaveBeenCalled(); f.contents.send.mockClear();
+        expect(f.updater.install).not.toHaveBeenCalled(); expect(f.app.quit).not.toHaveBeenCalled();
+        f.Menu.buildFromTemplate.mock.calls[0]![0][0]!.submenu!.find(item => item.label?.startsWith('Install'))!.click!();
+        await vi.waitFor(() => expect(f.contents.send.mock.calls.some(call => call[0] === CHANNELS.prepare)).toBe(true));
         expect(f.child.postMessage).not.toHaveBeenCalled(); expect(f.updater.install).not.toHaveBeenCalled();
-        const request = f.contents.send.mock.calls[0]![1] as { requestId: string; reason: string };
+        const request = f.contents.send.mock.calls.find(call => call[0] === CHANNELS.prepare)![1] as { requestId: string; reason: string };
         expect(request.reason).toBe('update'); f.ipcMain.emit(CHANNELS.prepared, f.event, { requestId: request.requestId });
         await vi.waitFor(() => expect(f.child.postMessage).toHaveBeenCalledOnce()); expect(f.updater.install).not.toHaveBeenCalled();
         f.child.emit('exit', 0); await vi.waitFor(() => expect(f.updater.install).toHaveBeenCalledOnce());
         expect(f.app.quit).not.toHaveBeenCalled();
+    });
+    it('reports the pinned downloaded update as ready when the File menu checks again without entering the save barrier', async () => {
+        const f = await desktop(); f.createUpdater.mock.calls[0]![0].onDownloaded('1.3.3'); f.contents.send.mockClear();
+        f.Menu.buildFromTemplate.mock.calls[0]![0][0]!.submenu!.find(item => item.label?.startsWith('Check'))!.click!();
+        await vi.waitFor(() => expect(f.dialog.showMessageBox).toHaveBeenCalledWith(f.window, expect.objectContaining({ message: 'An update is ready to install.' })));
+        expect(f.contents.send).not.toHaveBeenCalled(); expect(f.child.postMessage).not.toHaveBeenCalled();
+        expect(f.updater.install).not.toHaveBeenCalled(); expect(f.app.quit).not.toHaveBeenCalled();
     });
     it('can quit cleanly after a main document load failure, without waiting for a client that never started', async () => {
         const f = await desktop(true); expect(f.dialog.showErrorBox).toHaveBeenCalledOnce(); expect(f.app.quit).toHaveBeenCalledOnce();

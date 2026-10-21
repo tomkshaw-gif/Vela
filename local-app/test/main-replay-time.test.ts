@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as replayTime from '../client/replay-time';
+import { mountDateTimePickers, type DateTimePickers } from '../client/date-time-picker';
 import { escapeHtml, utc } from '../client/util';
 import { DEFAULT_RULES, INSTRUMENTS, type SessionView } from '../shared/types';
 import { createSession } from '../engine';
@@ -11,7 +12,7 @@ const source = ts.createSourceFile('main.ts', readFileSync('local-app/client/mai
 const studio = source.statements.find(node => ts.isClassDeclaration(node) && node.name?.text === 'ReplayStudio');
 if (!studio || !ts.isClassDeclaration(studio)) throw new Error('ReplayStudio is missing.');
 const names = new Set(['showDialog', 'goToDialog', 'zoneOptions', 'updateStartTime', 'updateGoToZone', 'newSessionDialog', 'applyPreset',
-    'submit', 'createSession', 'error', 'timeOffsetMarkup', 'updateTimeOccurrences', 'readReplayTime', 'replayTimeChanged']);
+    'submit', 'createSession', 'error', 'timeOffsetMarkup', 'updateTimeOccurrences', 'readReplayTime', 'replayTimeChanged', 'mountReplayTimePickers']);
 const methods = studio.members.filter(member => ts.isMethodDeclaration(member) && names.has(member.name.getText(source)));
 const compiled = ts.transpileModule(`class Harness { ${methods.map(method => method.getText(source)).join('\n')} }`, {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
@@ -19,6 +20,7 @@ const compiled = ts.transpileModule(`class Harness { ${methods.map(method => met
 
 interface Harness {
     replayZone: string; modalGeneration: number;
+    dateTimePickers?: DateTimePickers;
     view: SessionView;
     bootstrap: { datasets: SessionView['dataset'][]; sessions?: { id: string; startTime: number; endTime: number }[] };
     goToDialog(): void; newSessionDialog(): void;
@@ -44,7 +46,7 @@ function fixture(start = '2026-11-01T04:00:00Z', end = '2026-11-01T08:00:00Z', c
     const value = (id: string): string => ($(`#${id}`) as HTMLInputElement).value;
     const numeric = (id: string): number => Number(value(id));
     const optionalNumber = (id: string): number | undefined => value(id).trim() ? numeric(id) : undefined;
-    const dependencies = { ...replayTime, $, value, numeric, optionalNumber, esc: escapeHtml, utc, DEFAULT_RULES };
+    const dependencies = { ...replayTime, mountDateTimePickers, $, value, numeric, optionalNumber, esc: escapeHtml, utc, DEFAULT_RULES };
     const Constructor = new Function(...Object.keys(dependencies), `${compiled}; return Harness;`)(...Object.values(dependencies)) as new () => Harness;
     const harness = new Constructor();
     const post = vi.fn(async () => view); const jumpToTime = vi.fn(async (_time: number) => undefined); const toast = vi.fn();
@@ -60,7 +62,7 @@ function fixture(start = '2026-11-01T04:00:00Z', end = '2026-11-01T08:00:00Z', c
         else if (target.id === 'new-zone') harness.updateStartTime(false);
     };
     document.addEventListener('input', listener); document.addEventListener('change', listener);
-    cleanups.push(() => { document.removeEventListener('input', listener); document.removeEventListener('change', listener); });
+    cleanups.push(() => { harness.dateTimePickers?.destroy(); document.removeEventListener('input', listener); document.removeEventListener('change', listener); });
     const input = (id: string): HTMLInputElement => document.getElementById(id) as HTMLInputElement;
     const select = (id: string): HTMLSelectElement => document.getElementById(id) as HTMLSelectElement;
     const edit = (id: string, value: string): void => { const field = input(id); field.value = value; field.dispatchEvent(new Event('input', { bubbles: true })); };
@@ -70,6 +72,62 @@ function fixture(start = '2026-11-01T04:00:00Z', end = '2026-11-01T08:00:00Z', c
 }
 
 describe('replay time form disambiguation', () => {
+    it('replaces native date popups with an explicit app picker', () => {
+        const f = fixture(); f.harness.newSessionDialog();
+        for (const id of ['new-start-time', 'new-end-time']) {
+            expect(f.input(id).hidden).toBe(true);
+            expect(f.input(id).readOnly).toBe(true);
+            expect(document.querySelector(`[data-date-time-trigger="${id}"]`)).not.toBeNull();
+        }
+        f.harness.goToDialog();
+        expect(f.input('go-to-time').hidden).toBe(true);
+        expect(document.querySelector('[data-date-time-trigger="go-to-time"]')).not.toBeNull();
+    });
+
+    it('recovers the full April cached range after invalid edits without replacing non-date drafts', async () => {
+        const f = fixture('2024-04-08T00:00:00Z', '2024-04-10T00:00:00Z'); f.harness.newSessionDialog();
+        f.input('new-name').value = 'Keep my session name'; f.input('new-balance').value = '75000';
+        f.edit('new-start-time', '2024-02-01T07:24:18'); f.edit('new-end-time', '2026-10-21T00:00');
+        await f.submit(); expect(f.post).not.toHaveBeenCalled();
+        expect(document.querySelector<HTMLElement>('#dialog-error')!.hidden).toBe(false);
+        const reset = document.querySelector<HTMLButtonElement>('[data-date-range-reset]'); expect(reset).not.toBeNull(); reset!.click();
+        expect(f.input('new-start-time').value).toBe('2024-04-08T00:00');
+        expect(f.input('new-end-time').value).toBe('2024-04-10T00:00');
+        expect(f.input('new-start-time').validationMessage).toBe(''); expect(f.input('new-end-time').validationMessage).toBe('');
+        expect(document.querySelector<HTMLElement>('#dialog-error')!.hidden).toBe(true);
+        expect(f.input('new-name').value).toBe('Keep my session name'); expect(f.input('new-balance').value).toBe('75000');
+        await f.submit(); expect(f.post).toHaveBeenCalledExactlyOnceWith('/api/sessions', expect.objectContaining({
+            startTime: epoch('2024-04-08T00:00:00Z'), endTime: epoch('2024-04-10T00:00:00Z'), initialBalance: 75000,
+        }));
+    });
+
+    it('submits second-precision picker values through the existing parser', async () => {
+        const f = fixture('2024-04-08T00:00:00Z', '2024-04-10T00:00:00Z'); f.harness.newSessionDialog();
+        document.querySelector<HTMLButtonElement>('[data-date-time-trigger="new-start-time"]')!.click();
+        const time = document.querySelector<HTMLInputElement>('[data-draft-time]')!;
+        time.value = '07:24:18'; time.dispatchEvent(new Event('input', { bubbles: true }));
+        document.querySelector<HTMLButtonElement>('[data-picker-apply]')!.click(); await f.submit();
+        expect(f.post).toHaveBeenCalledExactlyOnceWith('/api/sessions', expect.objectContaining({ startTime: epoch('2024-04-08T07:24:18Z') }));
+    });
+
+    it('refreshes display and bounds on dataset/zone changes and destroys a replaced popup', () => {
+        const f = fixture(); f.harness.newSessionDialog();
+        const trigger = document.querySelector<HTMLButtonElement>('[data-date-time-trigger="new-start-time"]')!; trigger.click();
+        f.choose('new-zone', 'America/New_York'); expect(document.querySelector<HTMLElement>('.date-time-picker')!.hidden).toBe(true);
+        expect(trigger.textContent).toContain('01 November 2026 · 00:00:00');
+        f.harness.bootstrap.datasets.push({ ...f.view.dataset, id: 'april', start: epoch('2024-04-08T00:00Z'), end: epoch('2024-04-10T00:00Z') });
+        f.select('new-dataset').add(new Option('April fixture', 'april')); f.choose('new-dataset', 'april');
+        expect(trigger.textContent).toContain('07 April 2024 · 20:00:00'); expect(document.querySelector('#new-data-range')!.textContent).toContain('2024-04-09 20:00:00 America/New_York');
+        trigger.click(); const oldApply = document.querySelector<HTMLButtonElement>('[data-picker-apply]')!;
+        f.harness.showDialog('Replacement', '<input id="new-start-time" value="untouched">'); oldApply.click(); trigger.click();
+        expect(f.input('new-start-time').value).toBe('untouched'); expect(document.querySelector('.date-time-control')).toBeNull();
+    });
+
+    it('focuses the visible date trigger after a canonical range error', async () => {
+        const f = fixture(); f.harness.newSessionDialog(); f.edit('new-start-time', '2026-11-02T06:15'); await f.submit();
+        expect(document.activeElement).toBe(document.querySelector('[data-date-time-trigger="new-start-time"]'));
+    });
+
     it('chooses the second New York 01:15 after a 06:10Z cursor, without wall-time bounds', async () => {
         const f = fixture(); f.harness.replayZone = 'America/New_York'; f.harness.goToDialog();
         const offset = f.select('go-to-time-offset'); expect(offset).not.toBeNull();

@@ -21,7 +21,7 @@ try { await access(join(root, 'node_modules/electron/dist/electron.exe')); }
 catch { await run(join(root, 'node_modules/electron/install.js')); }
 await mkdir(app, { recursive: true }); await mkdir(runtime, { recursive: true });
 await writeFile(join(app, 'package.json'), JSON.stringify({ name: 'vela-desktop', version, private: true, main: 'main.cjs', description: 'Local Vela replay and strategy workspace', author: 'Tom Shaw', license: 'AGPL-3.0-only', repository: { type: 'git', url: 'https://github.com/tomkshaw-gif/Vela.git' } }, null, 2) + '\n');
-for (const name of ['main.cjs', 'preload.cjs', 'lifecycle.cjs']) await copyFile(join(directory, name), join(app, name));
+for (const name of ['main.cjs', 'preload.cjs', 'lifecycle.cjs', 'updates.cjs']) await copyFile(join(directory, name), join(app, name));
 await build({ entryPoints: [join(directory, 'updater.cjs')], outfile: join(app, 'updater.cjs'), bundle: true, platform: 'node', format: 'cjs', target: 'node24', external: ['electron', 'node:*'], logLevel: 'warning' });
 await copyFile(join(directory, 'backend.mjs'), join(runtime, 'backend.mjs'));
 await build({ entryPoints: [join(root, 'local-app/server/index.ts')], outfile: join(runtime, 'server.mjs'), bundle: true, platform: 'node', format: 'esm', target: 'node24', external: ['node:*'], logLevel: 'warning' });

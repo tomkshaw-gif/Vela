@@ -1,0 +1,33 @@
+.date-time-field{display:flex;flex-direction:column;gap:8px;min-width:0;color:#d1d1d1;font-size:12.5px;font-weight:600}
+.date-time-control{min-width:0;font-weight:400}
+#modal .date-time-trigger{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;min-height:40px;border:1px solid #333;border-radius:12px;padding:9px 12px;background:#030303;color:#f6f6f6;text-align:left;font:inherit;font-size:14px;font-variant-numeric:tabular-nums}
+.date-time-trigger svg{flex:none;color:#a6aab3}
+#modal .date-time-trigger:hover{border-color:#666}
+.date-time-picker{--date-accent:var(--accent,#0260fd);width:min(100%,370px);margin-top:10px;padding:14px;border:1px solid #38383e;border-radius:12px;background:#111114;color:#f4f4f5;box-shadow:0 8px 28px #0005;font-size:12px;font-weight:400}
+.date-time-picker[hidden]{display:none!important}
+.date-time-picker-heading{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:14px}
+.date-time-picker-heading strong{font-size:13px}
+.date-time-picker-heading>span{font-size:10px;color:#a2a6af;text-align:right}
+.date-time-navigation{display:grid;grid-template-columns:30px 1fr 68px 30px;gap:6px;align-items:center}
+#modal .date-time-picker :is(input,select){min-height:32px;height:32px;padding:4px 7px;border:1px solid #3c3c45;border-radius:6px;background:#19191e;color:#f4f4f5;font:inherit;font-size:12px;line-height:1.4}
+#modal .date-time-picker button{min-height:30px;padding:4px 6px;border:1px solid transparent;border-radius:6px;background:transparent;color:#e4e4e7;font:inherit;font-size:12px}
+#modal .date-time-picker button:hover:not(:disabled){background:#292931}
+#modal .date-time-navigation>button{font-size:20px;line-height:1}
+.date-time-weekdays,.date-time-calendar{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:3px;text-align:center}
+.date-time-weekdays{margin:12px 0 4px;font-size:10px;color:#989da8}
+.date-time-weekdays span{padding:4px}
+#modal .date-time-calendar button{padding:5px 0;font-variant-numeric:tabular-nums}
+#modal .date-time-calendar button:disabled{opacity:.23}
+#modal .date-time-calendar button[aria-pressed=true]{background:var(--date-accent);color:#fff}
+.date-time-editors{display:grid;grid-template-columns:1.15fr 1fr;gap:10px;margin-top:14px}
+#modal .date-time-picker label{gap:5px;font-size:10px;color:#b7bac3;font-weight:500}
+.date-time-occurrence{margin-top:12px}
+.date-time-available,.date-time-error{margin-top:10px;font-size:10px;line-height:1.6;color:#a2a6af}
+.date-time-error{color:#ffb4bd}
+.date-time-picker-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:12px;padding-top:10px;border-top:1px solid #303037}
+#modal .date-time-picker-actions>button{min-width:68px;border-color:#44444e}
+#modal .date-time-picker-actions>.date-time-apply{border-color:var(--date-accent);background:var(--date-accent);color:#fff}
+#modal .date-time-picker-actions>.date-time-apply:hover:not(:disabled){filter:brightness(1.15);background:var(--date-accent)}
+.date-time-range{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px}
+.date-time-range>.field-note{flex:1;min-width:180px;margin:0}
+#modal .date-time-reset{flex:none;padding:7px 10px;border:1px solid #36363d;border-radius:7px;font:inherit;font-size:12px;color:#c3d7ff}

@@ -82,7 +82,6 @@ async function runDesktop({ app, BrowserWindow, utilityProcess, ipcMain, dialog,
     if (!app.requestSingleInstanceLock()) { app.quit(); return; }
     let window; let backend; let prepare; let lifecycle; let updater;
     let loaded = false;
-    let downloaded = false;
     const focus = () => { if (window && !window.isDestroyed()) { if (window.isMinimized()) window.restore(); window.show(); window.focus(); } };
     app.on('second-instance', focus); app.on('activate', focus);
     await app.whenReady();
@@ -107,16 +106,24 @@ async function runDesktop({ app, BrowserWindow, utilityProcess, ipcMain, dialog,
         await window.loadURL(url);
         loaded = true;
         const createUpdater = options.createUpdater ?? require('./updater.cjs').createDesktopUpdater;
-        updater = createUpdater({ app, onDownloaded: () => { downloaded = true; void lifecycle.close({ install: () => updater.install() }); }, onStatus: () => {} });
-        const updateAction = action => { void Promise.resolve().then(action).catch(error); };
+        updater = require('./updates.cjs').createUpdateController({ app, window, ipcMain, origin: url, lifecycle, createUpdater });
+        const updateAction = action => { void Promise.resolve().then(action).catch(() => {
+            if (!window.isDestroyed()) void dialog.showMessageBox(window, { type: 'error', title: 'Vela updates',
+                message: 'The update request could not finish. Try again.',
+                detail: 'Your workspace remains open. A downloaded update stays available to install.', buttons: ['OK'] }).catch(() => {});
+        }); };
         Menu.setApplicationMenu(Menu.buildFromTemplate([
             { label: 'File', submenu: [
                 { label: 'Check for updates…', click: () => updateAction(async () => {
                     await updater.check();
-                    if (!window.isDestroyed()) await dialog.showMessageBox(window, { type: 'info', title: 'Vela updates', message: 'Update check complete.', detail: 'Available updates download automatically and install after your workspace is saved.', buttons: ['OK'] });
+                    const status = updater.getState().status;
+                    if (!window.isDestroyed()) await dialog.showMessageBox(window, { type: 'info', title: 'Vela updates',
+                        message: status === 'ready' ? 'An update is ready to install.' : status === 'downloading' ? 'An update is downloading.' :
+                            status === 'error' ? 'The update check could not finish.' : status === 'installing' ? 'Vela is preparing to install the update.' : 'Update check complete.',
+                        detail: 'Updates install only when you choose Install update. Vela saves your workspace before restarting.', buttons: ['OK'] });
                 }) },
                 { label: 'Install downloaded update…', click: () => {
-                    if (downloaded) void lifecycle.close({ install: () => updater.install() });
+                    if (['ready', 'installing'].includes(updater.getState().status)) updateAction(() => updater.install());
                     else updateAction(() => dialog.showMessageBox(window, { type: 'info', title: 'Vela updates', message: 'No downloaded update is ready.', detail: 'Use File → Check for updates to look for a new version.', buttons: ['OK'] }));
                 } },
                 { type: 'separator' }, { role: 'quit' },

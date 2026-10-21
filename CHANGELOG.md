@@ -6,6 +6,12 @@ All notable changes to Vela, newest first.
 
 ### Added
 
+- **Desktop update button.** Check for updates from the bottom-left control and
+  choose when to restart. Downloads stay in the background; installing first
+  saves the workspace and closes the local runtime.
+- **Date and time picker.** Choose cached session dates in a themed calendar,
+  confirm with Apply or discard with Cancel, and reset the full cached range.
+
 - **Backtesting home.** Start on a dashboard of saved sessions and account totals.
   Search and filter attempts, resume a session, or open the standard chart view.
   New sessions choose a cached contract and a start/end date range that replay

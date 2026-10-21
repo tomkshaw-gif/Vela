@@ -1,5 +1,6 @@
 import './session-dashboard.css';
 import type { DatasetMeta, SessionSummary } from '../shared/types';
+import { mountDesktopUpdates } from './desktop-updates';
 
 type DashboardSession = SessionSummary & { startIndex?: number; endIndex?: number; startTime?: number; endTime?: number };
 export interface SessionDashboardCallbacks {
@@ -68,7 +69,9 @@ export function mountSessionDashboard(host: HTMLElement, callbacks: SessionDashb
     const home = node('span', 'sd-nav-current', 'Backtesting'); home.setAttribute('aria-current', 'page');
     nav.append(home, button('Chart mode ↗', 'sd-nav-button', guarded(() => callbacks.openChart())), button('Data & settings', 'sd-nav-button', guarded(() => callbacks.openData())));
     const local = node('div', 'sd-sidebar-note'); local.append(node('span', 'sd-local-dot'), node('span', '', 'Local workspace'), node('small', '', 'Simulated trading'));
-    sidebar.append(nav, local);
+    const sidebarFooter = node('div', 'sd-sidebar-footer');
+    const disposeUpdates = mountDesktopUpdates(sidebarFooter);
+    sidebarFooter.append(local); sidebar.append(nav, sidebarFooter);
 
     const main = node('main', 'sd-main');
     const header = node('header', 'sd-heading');
@@ -234,6 +237,6 @@ export function mountSessionDashboard(host: HTMLElement, callbacks: SessionDashb
     render();
     return {
         update(next) { if (disposed) return; snapshot = { ...next, sessions: [...next.sessions], datasets: [...next.datasets] }; render(); },
-        destroy() { if (disposed) return; disposed = true; root.remove(); if (!hadHostClass) host.classList.remove('session-dashboard-host'); },
+        destroy() { if (disposed) return; disposed = true; disposeUpdates(); root.remove(); if (!hadHostClass) host.classList.remove('session-dashboard-host'); },
     };
 }

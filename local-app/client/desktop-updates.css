@@ -1,0 +1,22 @@
+.desktop-updates { display:flex; flex-direction:column; align-items:stretch; gap:7px; min-width:0; font:400 12px/18px "Nunito Sans",system-ui,sans-serif; color:#a4a6ab; }
+.desktop-updates .desktop-update-button { display:flex; align-items:center; justify-content:flex-start; gap:9px; width:100%; min-height:38px; padding:8px 12px; border:1px solid #30343d; border-radius:8px; background:#15171c; color:#e4e5e9; cursor:pointer; text-align:left; font:600 13px/20px "Nunito Sans",system-ui,sans-serif; }
+.desktop-updates .desktop-update-button:hover:not([aria-disabled="true"]) { background:#232731; border-color:#5e6d8c; }
+.desktop-updates .desktop-update-button:focus-visible { outline:2px solid #74a6ff; outline-offset:3px; }
+.desktop-updates .desktop-update-button[aria-disabled="true"] { cursor:default; color:#a4a6ab; }
+.desktop-update-icon { flex:none; font:400 20px/20px system-ui,sans-serif; }
+.desktop-updates[data-state="ready"] .desktop-update-button { border-color:#4667f5; background:#2446ce; color:#fff; }
+.desktop-updates[data-state="ready"] .desktop-update-button:hover:not([aria-disabled="true"]) { background:#3157e8; border-color:#7194ff; }
+.desktop-update-note { padding:0 2px; font:inherit; overflow-wrap:anywhere; }
+.desktop-updates-compact { flex-direction:row; align-items:center; gap:12px; padding:4px 8px; background:#0f0f0f; border-top:1px solid #292929; }
+.desktop-updates-compact .desktop-update-button { width:auto; min-height:28px; padding:3px 8px; white-space:nowrap; }
+.desktop-updates-compact .desktop-update-note { min-width:0; font-size:11px; }
+.sd-sidebar-footer { display:flex; flex-direction:column; gap:16px; margin-top:auto; padding:24px 12px 8px; }
+.sd-sidebar-footer .sd-sidebar-note { margin:0; padding:0 4px; }
+@media (max-width:900px) {
+    .sd-sidebar-footer { margin:0; padding:0; gap:0; }
+    .sd-sidebar-footer .desktop-update-note { display:none; }
+    .sd-sidebar-footer .desktop-update-button { min-height:32px; padding:5px 8px; font-size:12px; }
+}
+@media (max-width:540px) {
+    .desktop-updates-compact .desktop-update-note { display:none; }
+}

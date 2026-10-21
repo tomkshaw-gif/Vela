@@ -5,6 +5,8 @@ import { LocalApi, ApiError } from './api';
 import { ReplayCharts } from './charts';
 import { RuntimeCoordinator, rememberSession, selectedSession, type RuntimeNotice } from './runtime';
 import { nextSessionTime, parseWallTime, REPLAY_ZONES, wallTimeInput, wallTimeOccurrences, type JumpPreset } from './replay-time';
+import { mountDateTimePickers, type DateTimePickers } from './date-time-picker';
+import './date-time-picker.css';
 import { runReplayJump } from './replay-jump';
 import { ReplayPlayback } from './replay-playback';
 import { ReplayAnalyticsRefresh } from './replay-analytics';
@@ -81,6 +83,7 @@ class ReplayStudio {
     private quote: ProviderQuote | null = null;
     private quoteGeneration = 0;
     private modalGeneration = 0;
+    private dateTimePickers: DateTimePickers | null = null;
     private disposed = false;
     private disposers: (() => void)[] = [];
     private mutationBusy = false;
@@ -239,7 +242,11 @@ class ReplayStudio {
         };
         const unload = (): void => this.dispose();
         const modal = $<HTMLDialogElement>('#modal');
-        const close = (): void => { this.modalGeneration++; this.invalidateQuote(); const key = document.querySelector<HTMLInputElement>('#provider-key'); if (key) key.value = ''; };
+        const close = (): void => {
+            this.modalGeneration++; this.invalidateQuote();
+            if (!modal.open) { this.dateTimePickers?.destroy(); this.dateTimePickers = null; }
+            const key = document.querySelector<HTMLInputElement>('#provider-key'); if (key) key.value = '';
+        };
         document.addEventListener('click', click);
         document.addEventListener('keydown', keydown, true);
         document.addEventListener('change', change);
@@ -802,6 +809,7 @@ class ReplayStudio {
 
     private showDialog(title: string, body: string, wide = false): void {
         const modal = $<HTMLDialogElement>('#modal');
+        this.dateTimePickers?.destroy(); this.dateTimePickers = null;
         if (modal.open) modal.close();
         this.modalGeneration++;
         modal.classList.toggle('wide-modal', wide);
@@ -829,9 +837,11 @@ class ReplayStudio {
         const { dataset } = this.view;
         const summary = this.bootstrap?.sessions?.find(item => item.id === this.view!.session.id);
         const last = Math.min(dataset.end, summary?.endTime ?? dataset.end) - dataset.intervalMs;
-        const next = Math.min(last, this.charts.cursorTime === null ? dataset.start : this.charts.cursorTime + dataset.intervalMs);
-        this.showDialog('Go to', `<form id="go-to-form" class="modal-form"><div class="session-jumps"><button type="button" class="quiet" data-action="jump-preset" data-preset="london">London <small>08:00 local</small></button><button type="button" class="quiet" data-action="jump-preset" data-preset="new-york">New York <small>09:30 local</small></button><button type="button" class="quiet" data-action="jump-preset" data-preset="next-day">Next day <small>Same local time</small></button></div><p class="field-note">London and New York use the next weekday opening, with daylight saving. Next day uses the selected time zone. Missing candles land on the next available candle.</p><div class="two-fields"><label>Destination · date & time<input id="go-to-time" type="datetime-local" step="1" required value="${wallTimeInput(next, this.replayZone)}" data-zone="${this.replayZone}" /></label><label>Time zone<select id="go-to-zone">${this.zoneOptions()}</select></label></div>${this.timeOffsetMarkup('go-to-time')}<p class="muted">Every skipped candle still processes orders, stops and account rules. Long jumps run in small batches; press Stop or Space to pause. Choose a new session to start earlier.</p><div class="modal-actions"><button type="button" class="quiet" data-action="close-modal">Cancel</button><button class="primary">Go to time</button></div></form>`);
+        const first = Math.max(dataset.start, summary?.startTime ?? dataset.start);
+        const next = Math.min(last, this.charts.cursorTime === null ? first : Math.max(first, this.charts.cursorTime + dataset.intervalMs));
+        this.showDialog('Go to', `<form id="go-to-form" class="modal-form"><div class="session-jumps"><button type="button" class="quiet" data-action="jump-preset" data-preset="london">London <small>08:00 local</small></button><button type="button" class="quiet" data-action="jump-preset" data-preset="new-york">New York <small>09:30 local</small></button><button type="button" class="quiet" data-action="jump-preset" data-preset="next-day">Next day <small>Same local time</small></button></div><p class="field-note">London and New York use the next weekday opening, with daylight saving. Next day uses the selected time zone. Missing candles land on the next available candle.</p><div class="two-fields"><div class="date-time-field"><span>Destination date &amp; time</span><input id="go-to-time" data-date-time-picker aria-label="Destination date and time" type="datetime-local" step="1" required value="${wallTimeInput(next, this.replayZone)}" data-zone="${this.replayZone}" /></div><label>Time zone<select id="go-to-zone">${this.zoneOptions()}</select></label></div>${this.timeOffsetMarkup('go-to-time')}<p id="go-to-data-range" class="field-note"></p><p class="muted">Every skipped candle still processes orders, stops and account rules. Long jumps run in small batches; press Stop or Space to pause. Choose a new session to start earlier.</p><div class="modal-actions"><button type="button" class="quiet" data-action="close-modal">Cancel</button><button class="primary">Go to time</button></div></form>`);
         this.updateTimeOccurrences($<HTMLInputElement>('#go-to-time'), next);
+        this.mountReplayTimePickers($<HTMLFormElement>('#go-to-form'));
     }
 
     private zoneOptions(): string {
@@ -842,44 +852,76 @@ class ReplayStudio {
         return `<label hidden>Repeated local time: UTC offset<select id="${id}-offset" disabled></select><span class="field-note">This local time occurs twice. Choose the intended UTC offset.</span></label>`;
     }
 
+    private mountReplayTimePickers(form: HTMLFormElement): void {
+        this.dateTimePickers?.destroy();
+        this.dateTimePickers = mountDateTimePickers(form, { range: input => {
+            const dataset = form.id === 'new-session-form'
+                ? this.bootstrap?.datasets.find(item => item.id === form.querySelector<HTMLSelectElement>('#new-dataset')?.value) : this.view?.dataset;
+            if (!dataset) return undefined;
+            if (input.id === 'new-end-time') {
+                let start = dataset.start;
+                try { start = this.readReplayTime(form.querySelector<HTMLInputElement>('#new-start-time')!, false); } catch { /* The start can be recovered separately or reset. */ }
+                return { start: Math.max(dataset.start, start) + 1000, end: dataset.end, endInclusive: true };
+            }
+            if (form.id === 'go-to-form') {
+                const summary = this.bootstrap?.sessions?.find(item => item.id === this.view?.session.id);
+                return { start: Math.max(dataset.start, summary?.startTime ?? dataset.start, this.charts.cursorTime === null ? dataset.start : this.charts.cursorTime + 1000),
+                    end: Math.min(dataset.end - dataset.intervalMs, (summary?.endTime ?? dataset.end) - 1000), endInclusive: true };
+            }
+            return { start: dataset.start, end: dataset.end - dataset.intervalMs, endInclusive: true };
+        } });
+        const range = form.querySelector('#go-to-data-range');
+        if (range && this.view) {
+            const summary = this.bootstrap?.sessions?.find(item => item.id === this.view?.session.id);
+            range.textContent = `Session: ${utc(Math.max(this.view.dataset.start, summary?.startTime ?? this.view.dataset.start))} to ${utc(Math.min(this.view.dataset.end, summary?.endTime ?? this.view.dataset.end))} (end excluded). Choose a time after the current replay cursor.`;
+        }
+    }
+
     private updateTimeOccurrences(input: HTMLInputElement, knownTime?: number): void {
         const form = input.form; const modal = input.closest<HTMLDialogElement>('#modal');
         const offset = form?.querySelector<HTMLSelectElement>(`#${input.id}-offset`);
         if (!form?.isConnected || !modal?.open || !offset) return;
         input.removeAttribute('min'); input.removeAttribute('max'); input.setCustomValidity('');
         try {
-            const occurrences = wallTimeOccurrences(input.value, input.dataset.zone ?? this.replayZone);
+            const localValue = input.value.replace(/\.0+$/, '');
+            const occurrences = wallTimeOccurrences(localValue, input.dataset.zone ?? this.replayZone);
             offset.closest('label')!.hidden = occurrences.length <= 1; offset.disabled = occurrences.length <= 1; offset.required = occurrences.length > 1;
             const known = occurrences.find(item => item.time === knownTime);
             if (known && occurrences.length > 1) offset.dataset.preferredOffset = String(known.offsetMinutes);
             offset.replaceChildren(new Option('Choose UTC offset', ''), ...occurrences.map(item => new Option(item.label, String(item.offsetMinutes))));
             offset.value = occurrences.length === 1 ? String(occurrences[0]!.offsetMinutes) : offset.dataset.preferredOffset ?? '';
-            if (!occurrences.length) parseWallTime(input.value, input.dataset.zone ?? this.replayZone);
+            if (!occurrences.length) parseWallTime(localValue, input.dataset.zone ?? this.replayZone);
             if (occurrences.length > 1 && !offset.value) input.setCustomValidity('Choose a UTC offset for this repeated local time.');
         } catch (error) {
             offset.closest('label')!.hidden = true; offset.disabled = true; offset.required = false;
             input.setCustomValidity(error instanceof Error ? error.message : 'Choose a valid date and time.');
         }
+        this.dateTimePickers?.sync();
     }
 
     private readReplayTime(input: HTMLInputElement, validateRange = true): number {
         const form = input.form; const offset = form?.querySelector<HTMLSelectElement>(`#${input.id}-offset`);
         if (!form?.isConnected || !input.closest<HTMLDialogElement>('#modal')?.open || !offset) throw new Error('The time dialog changed. Reopen it and try again.');
-        const zone = input.dataset.zone ?? this.replayZone;
-        const time = parseWallTime(input.value, zone, offset.value === '' ? undefined : { offsetMinutes: Number(offset.value) });
-        if (validateRange) {
-            const dataset = form.id === 'new-session-form'
-                ? this.bootstrap?.datasets.find(item => item.id === form.querySelector<HTMLSelectElement>('#new-dataset')?.value) : this.view?.dataset;
-            const isEnd = input.id === 'new-end-time';
-            if (!dataset || time < dataset.start || time > (isEnd ? dataset.end : dataset.end - dataset.intervalMs)) throw new RangeError('Choose a time within the cached dataset range.');
-            if (isEnd && time <= this.readReplayTime(form.querySelector<HTMLInputElement>('#new-start-time')!, false)) throw new RangeError('Choose an end time after the session start. The end is excluded.');
-            if (form.id === 'go-to-form') {
-                const summary = this.bootstrap?.sessions?.find(item => item.id === this.view?.session.id);
-                if (time < (summary?.startTime ?? dataset.start) || time >= (summary?.endTime ?? dataset.end)) throw new RangeError('Choose a time within the selected session range; its end is excluded.');
-                if (this.charts.cursorTime !== null && time <= this.charts.cursorTime) throw new RangeError('Choose a time after the current replay cursor.');
+        try {
+            const zone = input.dataset.zone ?? this.replayZone;
+            const time = parseWallTime(input.value.replace(/\.0+$/, ''), zone, offset.value === '' ? undefined : { offsetMinutes: Number(offset.value) });
+            if (validateRange) {
+                const dataset = form.id === 'new-session-form'
+                    ? this.bootstrap?.datasets.find(item => item.id === form.querySelector<HTMLSelectElement>('#new-dataset')?.value) : this.view?.dataset;
+                const isEnd = input.id === 'new-end-time';
+                if (!dataset || time < dataset.start || time > (isEnd ? dataset.end : dataset.end - dataset.intervalMs)) throw new RangeError('Choose a time within the cached dataset range.');
+                if (isEnd && time <= this.readReplayTime(form.querySelector<HTMLInputElement>('#new-start-time')!, false)) throw new RangeError('Choose an end time after the session start. The end is excluded.');
+                if (form.id === 'go-to-form') {
+                    const summary = this.bootstrap?.sessions?.find(item => item.id === this.view?.session.id);
+                    if (time < (summary?.startTime ?? dataset.start) || time >= (summary?.endTime ?? dataset.end)) throw new RangeError('Choose a time within the selected session range; its end is excluded.');
+                    if (this.charts.cursorTime !== null && time <= this.charts.cursorTime) throw new RangeError('Choose a time after the current replay cursor.');
+                }
             }
+            return time;
+        } catch (error) {
+            if (validateRange) form.querySelector<HTMLButtonElement>(`[data-date-time-trigger="${input.id}"]`)?.focus();
+            throw error;
         }
-        return time;
     }
 
     private replayTimeChanged(target: HTMLInputElement | HTMLSelectElement): void {
@@ -923,10 +965,16 @@ class ReplayStudio {
         const times = inputs.map(field => reset || !field.value ? field === end ? dataset.end : dataset.start : this.readReplayTime(field, false));
         this.replayZone = zone;
         inputs.forEach((field, index) => {
+            if (reset) {
+                const offset = form.querySelector<HTMLSelectElement>(`#${field.id}-offset`);
+                if (offset) delete offset.dataset.preferredOffset;
+            }
             const time = times[index]!; field.dataset.zone = zone; field.value = wallTimeInput(time, zone);
             this.updateTimeOccurrences(field, time);
         });
-        form.querySelector('#new-data-range')!.textContent = `Cached: ${utc(dataset.start)} to ${utc(dataset.end)} (end excluded). Replay starts at the first available candle at or after your chosen time.`;
+        const error = form.closest('#modal')?.querySelector<HTMLElement>('#dialog-error');
+        if (reset && error) { error.hidden = true; error.textContent = ''; }
+        form.querySelector('#new-data-range')!.textContent = `Cached: ${wallTimeInput(dataset.start, zone).replace('T', ' ')} to ${wallTimeInput(dataset.end, zone).replace('T', ' ')} ${zone} (end excluded). Replay starts at the first available candle at or after your chosen time.`;
     }
 
     private updateGoToZone(): void {
@@ -985,12 +1033,17 @@ class ReplayStudio {
         if (!datasets.length) {
             this.showDialog('Choose your starting point', `<div class="modal-form"><p class="modal-lead">Every good session starts with the right data.</p><p class="muted">Import a contract's OHLCV file, request a data cost estimate, or explore with deterministic synthetic demo data.</p><button class="primary" data-action="demo">Create synthetic demo data</button><button class="quiet" data-action="data">Open data & settings ↗</button></div>`); return;
         }
-        this.showDialog('Create a session', `<form id="new-session-form" class="modal-form"><div class="two-fields"><label>Session name<input id="new-name" value="${esc(`Morning practice ${new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`)}" maxlength="120" required /></label><label>Balance preset<select id="preset"><option value="50">Generic 50K</option><option value="100">Generic 100K</option><option value="custom">Custom</option></select></label></div><label>Contract / cached dataset<select id="new-dataset">${datasets.map((dataset) => `<option value="${esc(dataset.id)}">${esc(dataset.name)} · ${esc(dataset.symbol)} · ${dataset.schema} · ${dataset.source === 'demo' ? 'SYNTHETIC' : dataset.source}</option>`).join('')}</select></label><div class="two-fields"><label>Replay start: date & time<input id="new-start-time" type="datetime-local" step="1" required /></label><label>Time zone<select id="new-zone">${this.zoneOptions()}</select></label></div>${this.timeOffsetMarkup('new-start-time')}<label>Session end: date & time (excluded)<input id="new-end-time" type="datetime-local" step="1" required /></label>${this.timeOffsetMarkup('new-end-time')}<p id="new-data-range" class="field-note"></p><div class="two-fields"><label>Session mode<select id="new-mode"><option value="practice">Free practice</option><option value="prop">Prop evaluation</option></select></label><label>Initial balance · USD<input id="new-balance" type="number" min="1" step="1" value="50000" required /></label></div><details id="evaluation-rules" hidden><summary>Evaluation rules <span>Generic editable example</span></summary><div class="three-fields"><label>Profit target · USD<input id="rule-target" type="number" min="0" value="3000" required /></label><label>Daily loss · USD<input id="rule-daily" type="number" min="0" value="1000" required /></label><label>Max drawdown · USD<input id="rule-drawdown" type="number" min="0" value="2000" required /></label></div><div class="two-fields"><label>Drawdown model<select id="rule-type"><option value="trailing-eod">Trailing · end of day</option><option value="trailing-intraday">Trailing · intraday</option><option value="static">Static</option></select></label><label>Consistency limit · %<input id="rule-consistency" type="number" min="1" max="100" placeholder="Off" /></label></div><div class="three-fields"><label>Minimum trading days<input id="rule-days" type="number" min="0" max="365" value="5" required /></label><label>Max contracts<input id="rule-contracts" type="number" min="1" max="1000" value="5" required /></label><label>Reset hour · 0–23<input id="rule-hour" type="number" min="0" max="23" value="17" required /></label></div><label>Trading day timezone<input id="rule-zone" value="America/Chicago" required /></label><div class="check-row"><label><input id="rule-lock" type="checkbox" checked /> Lock drawdown at initial balance</label><label><input id="rule-flat" type="checkbox" checked /> Require flat to pass</label></div></details><details><summary>Advanced: fill costs</summary><div class="three-fields"><label>Commission / side · USD<input id="new-fee" type="number" min="0" step="0.01" value="2.50" required /></label><label>Slippage · ticks<input id="new-slippage" type="number" min="0" step="0.5" value="1" required /></label><label>Spread · ticks<input id="new-spread" type="number" min="0" step="0.5" value="0" required /></label></div></details><div class="modal-actions"><button type="button" class="quiet" data-action="close-modal">Cancel</button><button class="primary">Open practice workspace ↗</button></div></form>`, true);
+        this.showDialog('Create a session', `<form id="new-session-form" class="modal-form"><div class="two-fields"><label>Session name<input id="new-name" value="${esc(`Morning practice ${new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`)}" maxlength="120" required /></label><label>Balance preset<select id="preset"><option value="50">Generic 50K</option><option value="100">Generic 100K</option><option value="custom">Custom</option></select></label></div><label>Contract / cached dataset<select id="new-dataset">${datasets.map((dataset) => `<option value="${esc(dataset.id)}">${esc(dataset.name)} · ${esc(dataset.symbol)} · ${dataset.schema} · ${dataset.source === 'demo' ? 'SYNTHETIC' : dataset.source}</option>`).join('')}</select></label><div class="two-fields"><div class="date-time-field"><span>Replay start: date & time</span><input id="new-start-time" data-date-time-picker aria-label="Replay start date and time" type="datetime-local" step="1" required /></div><label>Time zone<select id="new-zone">${this.zoneOptions()}</select></label></div>${this.timeOffsetMarkup('new-start-time')}<div class="date-time-field"><span>Session end: date & time (excluded)</span><input id="new-end-time" data-date-time-picker aria-label="Session end date and time, excluded" type="datetime-local" step="1" required /></div>${this.timeOffsetMarkup('new-end-time')}<div class="date-time-range"><p id="new-data-range" class="field-note"></p><button type="button" class="quiet date-time-reset" data-date-range-reset>Use full cached range</button></div><div class="two-fields"><label>Session mode<select id="new-mode"><option value="practice">Free practice</option><option value="prop">Prop evaluation</option></select></label><label>Initial balance · USD<input id="new-balance" type="number" min="1" step="1" value="50000" required /></label></div><details id="evaluation-rules" hidden><summary>Evaluation rules <span>Generic editable example</span></summary><div class="three-fields"><label>Profit target · USD<input id="rule-target" type="number" min="0" value="3000" required /></label><label>Daily loss · USD<input id="rule-daily" type="number" min="0" value="1000" required /></label><label>Max drawdown · USD<input id="rule-drawdown" type="number" min="0" value="2000" required /></label></div><div class="two-fields"><label>Drawdown model<select id="rule-type"><option value="trailing-eod">Trailing · end of day</option><option value="trailing-intraday">Trailing · intraday</option><option value="static">Static</option></select></label><label>Consistency limit · %<input id="rule-consistency" type="number" min="1" max="100" placeholder="Off" /></label></div><div class="three-fields"><label>Minimum trading days<input id="rule-days" type="number" min="0" max="365" value="5" required /></label><label>Max contracts<input id="rule-contracts" type="number" min="1" max="1000" value="5" required /></label><label>Reset hour · 0–23<input id="rule-hour" type="number" min="0" max="23" value="17" required /></label></div><label>Trading day timezone<input id="rule-zone" value="America/Chicago" required /></label><div class="check-row"><label><input id="rule-lock" type="checkbox" checked /> Lock drawdown at initial balance</label><label><input id="rule-flat" type="checkbox" checked /> Require flat to pass</label></div></details><details><summary>Advanced: fill costs</summary><div class="three-fields"><label>Commission / side · USD<input id="new-fee" type="number" min="0" step="0.01" value="2.50" required /></label><label>Slippage · ticks<input id="new-slippage" type="number" min="0" step="0.5" value="1" required /></label><label>Spread · ticks<input id="new-spread" type="number" min="0" step="0.5" value="0" required /></label></div></details><div class="modal-actions"><button type="button" class="quiet" data-action="close-modal">Cancel</button><button class="primary">Open practice workspace ↗</button></div></form>`, true);
         const preferred = this.view?.dataset.id ?? datasets.find(dataset => dataset.source === 'databento')?.id ?? datasets[0]!.id;
         $<HTMLSelectElement>('#new-dataset').value = preferred;
         $<HTMLFormElement>('#new-session-form').dataset.mode = mode;
         this.updateStartTime(true);
         this.replayTimeChanged($<HTMLSelectElement>('#new-mode'));
+        const form = $<HTMLFormElement>('#new-session-form');
+        this.mountReplayTimePickers(form);
+        form.querySelector<HTMLButtonElement>('[data-date-range-reset]')!.onclick = () => {
+            if (!this.disposed && form.isConnected && form.closest<HTMLDialogElement>('#modal')?.open) this.updateStartTime(true);
+        };
     }
 
     private applyPreset(preset: string): void {
@@ -1054,7 +1107,8 @@ class ReplayStudio {
         const ownsForm = (): boolean => modal.open && modal.contains(form) && form.isConnected && modalGeneration === this.modalGeneration
             && sessionGeneration === this.sessionGeneration && sessionId === this.view?.session.id && orderId === form.dataset.orderId
             && navigationGeneration === this.navigationGeneration;
-        const unchanged = (): boolean => fields.every(({ field, value, checked }) => field.isConnected && field.value === value
+        const unchanged = (): boolean => !form.querySelector('[data-date-time-trigger][aria-expanded="true"]')
+            && fields.every(({ field, value, checked }) => field.isConnected && field.value === value
             && (!(field instanceof HTMLInputElement) || field.checked === checked));
         const saveCommand = async (command: Command, message?: string): Promise<void> => {
             const outcome = await this.command(command, false, revision);
@@ -1153,6 +1207,7 @@ class ReplayStudio {
     dispose(): void {
         if (this.disposed) return;
         this.disposed = true; this.pause(); clearTimeout(this.toastTimer);
+        this.dateTimePickers?.destroy(); this.dateTimePickers = null;
         this.runtime.dispose(); this.runtimeMessage.remove();
         this.navigationGeneration++; this.dashboard.destroy();
         this.sessionController.abort(); this.sessionGeneration++; this.analyticsRefresh.destroy();

@@ -60,3 +60,18 @@ same mode can be reused. Unrelated listeners are never stopped or claimed.
 Launcher files and generated runtime output must contain no provider credential.
 Server calls remain in the backend. Runtime does not pull, merge, commit, publish,
 download data, change billing, or install an Electron application.
+
+## Installed desktop updates
+
+The Electron application uses a separate fixed loopback origin on port 5196.
+Its updater checks and downloads stable releases in the background. A completed
+download never closes the workspace. Installation requires an explicit
+**Restart to update** click or the corresponding File menu action; ordinary quit
+does not install a waiting update.
+
+The sandboxed main-frame bridge exposes update state, state subscriptions, check
+and install requests. Main-process handlers authenticate the window, frame and
+application origin. Both menu and renderer installation requests use the same
+save acknowledgement and backend-exit barrier before launching the verified
+installer. Save or installer failure keeps installation retryable. The Run and
+Develop launchers retain their existing source-change handoff behavior.

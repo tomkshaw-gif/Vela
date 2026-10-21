@@ -31,6 +31,7 @@ import { LOCAL_RANGE_PRESETS, mountDrawingUtilities } from './drawing-utilities'
 import { queueFreshCellAppearance } from './chart-cell-appearance';
 import { createChartQuoteBar } from './chart-quote-bar';
 import './chart-quote-bar.css';
+import { mountDesktopUpdates } from './desktop-updates';
 
 export { nativeChartConfig } from './chart-appearance';
 
@@ -53,6 +54,13 @@ registerWidgetAttachment({ id: 'local.replay', mount: (ctx) => {
     const undock = ctx.dockStrip(strip);
     chromeEvent(ctx, 'replay-mount', strip);
     return () => { chromeEvent(ctx, 'replay-unmount'); undock(); };
+} });
+registerWidgetAttachment({ id: 'local.desktop-updates', mount: (ctx) => {
+    if (!window.velaDesktop?.getUpdateState) return () => {};
+    const strip = ctx.host.ownerDocument.createElement('div');
+    const dispose = mountDesktopUpdates(strip, window.velaDesktop, true);
+    const undock = ctx.dockStrip(strip);
+    return () => { dispose(); undock(); };
 } });
 registerSidePanel({ id: 'local.trade', title: 'Trade', icon: 'local-trade', width: 300, resizable: true,
     mount: (ctx, body, header) => {

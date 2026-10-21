@@ -8,25 +8,31 @@ function createDesktopUpdater({ app, onDownloaded, onStatus = () => {}, updater 
     updater.autoInstallOnAppQuit = false;
     updater.allowPrerelease = false;
     updater.allowDowngrade = false;
-    // Public releases require no user credential, including inherited developer tokens.
+    const status = (value, version) => {
+        if (disposed) return;
+        const next = downloaded ? downloaded.version : version;
+        if (next === undefined) onStatus(downloaded ? 'ready' : value); else onStatus(downloaded ? 'ready' : value, next);
+    };
     const handlers = {
-        'checking-for-update': () => onStatus('checking'),
-        'update-available': () => onStatus('downloading'),
-        'update-not-available': () => onStatus('current'),
-        'error': () => onStatus('unavailable'),
-        'update-downloaded': update => { downloaded = update; onStatus('ready'); if (!disposed) onDownloaded(); },
+        'checking-for-update': () => status('checking'),
+        'update-available': update => status('downloading', update?.version),
+        'update-not-available': () => status('current'),
+        'error': () => status('unavailable'),
+        'update-downloaded': update => { if (disposed) return; downloaded = update; status('ready'); onDownloaded(update?.version); },
     };
     for (const [event, handler] of Object.entries(handlers)) updater.on(event, handler);
     const check = () => {
         if (disposed || !app.isPackaged) return Promise.resolve(null);
         if (checking) return checking;
-        checking = Promise.resolve().then(() => updater.checkForUpdates()).then(async result => {
+        // A later download can clear the shared pending cache before failing. Keep the accepted installer pinned.
+        if (downloaded) return Promise.resolve(null);
+        checking = Promise.resolve().then(() => disposed || downloaded ? null : updater.checkForUpdates()).then(async result => {
             if (result?.downloadPromise) await result.downloadPromise;
             return result;
-        }).finally(() => { checking = undefined; });
+        }).catch(error => { status('unavailable'); throw error; }).finally(() => { checking = undefined; });
         return checking;
     };
-    const checkQuietly = () => { void check().catch(() => onStatus('unavailable')); };
+    const checkQuietly = () => { void check().catch(() => {}); };
     const initial = setTimeout(checkQuietly, 15_000); initial.unref?.();
     const timer = setInterval(checkQuietly, intervalMs); timer.unref?.();
     return {
