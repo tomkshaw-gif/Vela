@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createReplayServer, serverOptionsFromEnvironment } from '../server/index';
@@ -175,7 +176,7 @@ describe('managed direct-entry configuration', () => {
     it('validates runtime mode, version and existing absolute stage paths without echoing invalid input', async () => {
         const repository = temporary(); const stage = join(repository, 'stage'); mkdirSync(stage); writeFileSync(join(repository, 'package.json'), '{}');
         const environment = { VELA_PORT: '5197', VELA_RUNTIME_MODE: 'run', VELA_RUNTIME_VERSION: 'abcdef0123456789', VELA_REPOSITORY_DIRECTORY: repository, VELA_STATIC_DIRECTORY: stage };
-        expect(await serverOptionsFromEnvironment(environment)).toMatchObject({ port: 5197, runtime: { mode: 'run', version: 'abcdef0123456789' }, repositoryDirectory: repository, staticDirectory: stage });
+        expect(await serverOptionsFromEnvironment(environment)).toMatchObject({ port: 5197, runtime: { mode: 'run', version: 'abcdef0123456789' }, repositoryDirectory: await realpath(repository), staticDirectory: await realpath(stage) });
         await expect(serverOptionsFromEnvironment({ ...environment, VELA_PORT: '5199' })).rejects.toThrow('does not match');
         await expect(serverOptionsFromEnvironment({ ...environment, VELA_RUNTIME_VERSION: 'private-value\ninvalid' })).rejects.toThrow('Invalid managed');
         await expect(serverOptionsFromEnvironment({ ...environment, VELA_REPOSITORY_DIRECTORY: 'relative/path' })).rejects.toThrow('Invalid local runtime path');

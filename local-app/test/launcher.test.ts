@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm, realpath, rename, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
@@ -136,9 +136,23 @@ describe('validated fast startup', () => {
     }
     it('reuses a complete content-verified build for the same repository and mode', async () => {
         const { directory, stage } = await stageFixture();
-        expect(await readCurrentStage(directory, 'run', 'repository')).toEqual(stage);
+        expect(await readCurrentStage(directory, 'run', 'repository')).toEqual({ ...stage, directory: await realpath(stage.directory) });
         expect(await readCurrentStage(directory, 'develop', 'repository')).toBeUndefined();
         expect(await readCurrentStage(directory, 'run', 'other-repository')).toBeUndefined();
+    });
+    it('reuses a verified stage through an alias of the runtime root', async () => {
+        const { directory, stage } = await stageFixture(); const alias = join(await fixture(), 'runtime-alias');
+        await symlink(await realpath(directory), alias, process.platform === 'win32' ? 'junction' : 'dir');
+        expect(await readCurrentStage(alias, 'run', 'repository')).toEqual({ ...stage, directory: await realpath(stage.directory) });
+    });
+    it('rejects a linked stage outside an aliased runtime root even when its content matches', async () => {
+        const { directory, stage } = await stageFixture(); const outside = join(await fixture(), 'outside');
+        await rename(stage.directory, outside);
+        await symlink(await realpath(outside), stage.directory, process.platform === 'win32' ? 'junction' : 'dir');
+        const alias = join(await fixture(), 'runtime-alias');
+        await symlink(await realpath(directory), alias, process.platform === 'win32' ? 'junction' : 'dir');
+        expect(await readCurrentStage(directory, 'run', 'repository')).toBeUndefined();
+        expect(await readCurrentStage(alias, 'run', 'repository')).toBeUndefined();
     });
     it('rejects changed or incomplete cached artifacts', async () => {
         const { directory, stage } = await stageFixture();

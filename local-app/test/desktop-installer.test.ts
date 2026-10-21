@@ -85,7 +85,7 @@ describe('verified desktop installer launch', () => {
         const f = fixture(); const pending = f.launch();
         await f.started.promise;
         expect(f.app.getPath).toHaveBeenCalledExactlyOnceWith('exe');
-        expect(f.start).toHaveBeenCalledExactlyOnceWith(realpathSync(f.downloadedFile),
+        expect(f.start).toHaveBeenCalledExactlyOnceWith(realpathSync.native(f.downloadedFile),
             ['--updated', '/S', '--force-run', `/D=${dirname(f.executable)}`],
             { detached: true, stdio: 'ignore', windowsHide: true, shell: false });
         f.child.emit('spawn'); await pending;

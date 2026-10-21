@@ -18,6 +18,7 @@ async function artifactFingerprint(directory) {
 }
 export async function readCurrentStage(runtimeRoot, mode, repositoryId) {
     try {
+        runtimeRoot = await realpath(runtimeRoot);
         const manifest = JSON.parse(await readFile(join(runtimeRoot, 'current.json'), 'utf8'));
         if (manifest.format !== 1 || manifest.mode !== mode || manifest.repositoryId !== repositoryId || !/^[a-f0-9]{16}$/.test(manifest.version) || typeof manifest.directory !== 'string' || basename(manifest.directory) !== manifest.directory || !/^[a-f0-9]{16}-[0-9]+$/.test(manifest.directory)) return undefined;
         const directory = resolve(runtimeRoot, manifest.directory);
